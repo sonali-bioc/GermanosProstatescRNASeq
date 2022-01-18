@@ -10,5 +10,5 @@ output:
 
 ## Introduction
 
-This github repository contains code to reproduce the analysis in our paper 
+This github repository contains code to reproduce the analysis in our upcoming paper 
 "Defining cellular population dynamics at single cell resolution during prostate cancer progression".
