@@ -1,0 +1,292 @@
+---
+title: "Reproducing Fig"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+In this vignette, we generate Figure 1 of the manuscript.
+
+```{r setup}
+library(Seurat)
+library(tidyverse)
+library(GSVA)
+library(stringr)
+library(readxl)
+library(MASS)
+library(RColorBrewer)
+library(readxl)
+
+# Function to collapse data from samples to genotypes
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c(Freq = "mean"))
+ return(data_sum)
+}
+```
+
+
+## Fig 1A: uncolored full WT+PTEN UMAP
+```{r}
+seurat = readRDS("data/seurat_cleaned.allcells.rds")
+seurat.fig1 = seurat[, seurat$genotype %in% c("WT_intact", "PTEN_intact")]
+seurat.fig1.epi = seurat.fig1[, seurat.fig1$expaned_cell_type=="Epithelial"]
+
+
+pdf(filename = "figures/Uncolored_UMAP_1A.pdf")
+DimPlot(seurat.fig1, group.by = 'genotype', cols = c('grey50', 'grey51'))
+dev.off()
+```
+## Fig 1B: Epithelial UMAP colored by subtype
+
+```{r}
+# Set colors for epi cell types
+epi_types = c("Basal", "Progenitor", "Differentiated")
+epi_colors = c("#E41A1C", "#377EB8", "#4DAF4A")
+
+# Set order for epi cell types in object
+seurat.fig1.epi$cell_types = factor(seurat.fig1.epi$cell_types, levels = epi_types)
+
+pdf("figures/epi_UMAP_whole_1B.pdf")
+DimPlot(seurat.fig1.epi, group.by = "cell_types", cols = epi_colors)
+dev.off()
+
+pdf("figures/epi_UMAP_split_1B.pdf", width = 14)
+DimPlot(seurat.fig1.epi, group.by = "cell_types",
+        split.by = "genotype", cols = epi_colors)
+dev.off()
+```
+
+
+## Fig. 1C: Epithelial Abundance
+
+```{r}
+
+# make table of cell abundance by genotype and cell type
+cell.num1 <- table(seurat.fig1.epi$cell_types, seurat.fig1.epi$sample_id)
+cell.num <- t(t(cell.num1) / (colSums(cell.num1))) * 100
+cell.num <- as.data.frame(cell.num)
+cell.num <- separate(cell.num, Var2, c("genotype", "rep"), "-")
+cell.num$genotype <- factor(cell.num$genotype,levels = c("WT_intact",
+                                                         "PTEN_intact"))
+cell.num$Var1 = factor(cell.num$Var1, levels = c("Basal", "Progenitor", "Differentiated"))
+
+# Summarize data to get mean & sd for each genotype/celltype
+a <- data_summary(cell.num, varname="Freq",
+                    groupnames=c("Var1", "genotype"))
+
+# Plot abundance
+
+dot.cell <- ggplot(cell.num, aes(x = genotype, y = Freq)) +
+  geom_jitter(position=position_jitter(w=0.1, h=0.1), size = 2) +
+  scale_color_viridis(discrete = T, option = "viridis") +
+  geom_errorbar(data = a, aes(x = genotype, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  geom_point(data = a, mapping = aes(x =genotype, y= mean),
+    size=6, color="black", shape="-") +
+  ggtitle("") +
+  theme_classic() +
+  facet_wrap( ~ Var1, scale = "free_y") +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 40,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+pdf("figures/abundance_dotplot_1C.pdf", height = 3.5, width = 5)
+dot.cell
+dev.off()
+
+
+# calculate stats
+data = table(seurat.fig1.epi$sample_id, seurat.fig1.epi$cell_states)
+dataNorm = round(data/rowSums(data) * max(rowSums(data)), digits = 0)
+dataNorm$treatment = c(1,1,0,0,0)
+
+
+p = c()
+fit = glm.nb(Basal~treatment, data = dataNorm)
+## Run neg binomial regression on B cells
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2]) ## Extract p-value from results
+fit = glm.nb(Differentiated~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Progenitor~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+
+## Add p-val and p-val corrections to dataframe
+res = cbind(data %>% t, dataNorm[,-4] %>% t, p %>% round(., digits = 10),
+             p.adjust(p, method = "BH"),
+             p.adjust(p, method = "bonferroni")) %>%
+data.frame %>% cbind(colnames(data), .)
+
+## Add column names to tidy it up
+colnames(res) = c("cellType", "PTEN_intact-2", "PTEN_intact-3", 
+   "WT_intact-1", "WT_intact-2", "WT_intact-3",
+   "PTEN_intact-2_Norm", "PTEN_intact-3_Norm", 
+    "WT_intact-1_Norm", "WT_intact-2_Norm",
+   "WT_intact-3_Norm", "p.value", "BH.adjP", "BF.adjP")
+
+write.csv(res, file = "epi_abundance_stats_1C.csv", 
+	    sep = ",", quote = F, col.names = T, row.names = F)
+```
+
+## Fig. 1D: GSEA
+
+```{r}
+path.dat <- read_xlsx('tables/Plotting.xlsx', sheet = 1)
+path.dat$padj <- -log10(as.numeric(path.dat$FDR))
+path.dat$Term <- as.factor(path.dat$Term)
+path.dat <- arrange(path.dat, padj)
+path.dat$Term <- factor(path.dat$Term, levels = rev(c("P53_DN.V1_UP",
+                                                  "AKT_UP.V1_UP",
+                                                  "MTOR_UP.V1_UP",
+                                                  "GO_REGULATION_OF_MAP_KINASE_ACTIVITY",
+                                                  "GO_REGULATION_OF_WNT_SIGNALING_PATHWAY",
+                                                  "GO_NOTCH_SIGNALING_PATHWAY",
+                                                  "GO_REGULATION_OF_EPITHELIAL_CELL_MIGRATION",
+                                                  "GO_EPITHELIAL_CELL_PROLIFERATION",
+                                                  "GO_GLUCOSE_METABOLIC_PROCESS",
+                                                  "GO_ATP_METABOLIC_PROCESS")))
+
+path.dat$Cell <- factor(path.dat$Cell, levels = c("Basal", "Progenitor", "Differentiated"))
+path.epi <- ggplot(path.dat, 
+  aes(x = Cell, y=Term, size=GeneRatio, color=padj)) +
+  geom_point() +
+  scale_color_gradient(low="blue", high = "red")+
+  ylab("") + xlab("") +
+  theme_classic() +
+  theme(axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 12,
+                                   face = "bold")) +
+  labs(size="Gene Ratio", colour="-log10(FDR)")
+
+pdf("figures/GSEA_dotplot_epi_1D.pdf", height=4)
+path.epi
+dev.off()
+```
+
+
+## Fig. 1E: CCP
+
+```{r}
+# CCP signature
+CCP <- c('Foxm1', 'Aspm', 'Tk1', 'Prc1', 'Cdc20', 'Bub1b', 'Pbk', 'Dtl',
+         'Cdkn3', 'Rrm2', 'Asf1b', 'Cep55', 'Cdk1', 'Dlgap5', 'Ska1',
+         'Rad51', 'Kif11', 'Birc5', 'Rad54l', 'Cenpm', 'Pclaf', 'Kif20a',
+         'Pttg1', 'Cdca8', 'Nusap1', 'Plk1', 'Cdca3', 'Orc6', 'Cenpf',
+         'Top2a', 'Mcm10')
+
+# calculates average expression of gene for each sample/cell type combo
+avg_exp = AverageExpression(object = seurat.fig1.epi, group.by = c("cell_types", "sample_id"))
+avg_exp = avg_exp[[1]] # non-log values
+log2_avg_exp = log2(avg_exp +1) # log values.
+
+# Calculate signature score
+CCP.l <- list("CCP" = CCP)
+CCP.score <- as.data.frame(t(gsva(data.matrix(log2_avg_exp), CCP.l)))
+
+spl <- str_split_fixed(rownames(CCP.score), "_", 2)
+spl.cell <- spl[, 1]
+spl.gen <- str_split_fixed(spl[,2], "-", 2)[,1]
+spl.rep <- str_split_fixed(spl[,2], "-", 2)[,2]
+CCP.df <- data.frame("Cell" = spl.cell, "Genotype" = spl.gen,
+                       "Rep" = spl.rep, "CCP" = CCP.score$CCP)
+
+a <- data_summary(CCP.df, varname="CCP",
+                    groupnames=c("Cell", "Genotype"))
+a$Genotype <- factor(a$Genotype,levels = c("WT_intact", "PTEN_intact"))
+a$Cell <- factor(a$Cell, levels = c("Basal", "Progenitor", "Differentiated"))
+
+p.CCP <- ggplot(a, aes(y=mean, x=Genotype, fill = Genotype)) +
+  geom_bar(stat="identity") +
+  facet_wrap( ~ Cell) +
+  scale_color_brewer(palette = "BuPu") +
+  ggtitle("Proliferation Signature") +
+  theme_classic() +
+  xlab("") +
+  ylab("CCP Composite Score") +
+  theme(plot.title = element_text(size = 20),
+        axis.title.y = element_text(size = 16),
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 11),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 13,
+                                   face = "bold")) +
+  geom_errorbar(data = a, aes(x = Genotype, y = mean, ymin = mean-sd,
+                              ymax = mean+sd),
+                size=0.5, color="red", width = 0.3)
+
+pdf("figures/CCP_barplot_1E.pdf")
+p.CCP
+dev.off()
+
+# calculate stats
+
+CCP.stats=data.frame("Progenitor"=CCP.df[CCP.df$Cell=="Progenitor",]$CCP,
+                        "Basal"=CCP.df[CCP.df$Cell=="Basal",]$CCP,
+                        "Differentiated"=CCP.df[CCP.df$Cell=="Differentiated",]$CCP,
+                        "ID"=c("PTEN_intact-2", "PTEN_intact-3", "WT_intact-1", "WT_intact-2", "WT_intact-3"))
+
+dataTmp <- CCP.stats[, -4]
+
+for(c in 1:3){
+  obsDiff = mean(dataTmp[1:2, c]) - mean(dataTmp[3:5, c]) # difference in mean WT vs PTEN
+  sampleDiff = c()
+  N = 10000
+  for(i in 1:N){
+    sData = sample(dataTmp[, c], replace = T)  # Sample values from column c at random with replacement
+    sampleDiff = c(sampleDiff, mean(sData[1:2]) - mean(sData[3:5])) # take difference of means for random numbers
+
+  }
+  if(obsDiff > 0){
+    print(sum(sampleDiff >= obsDiff)/N)  # Number of times the random difference in means is greater than real
+  }else{
+    print(sum(sampleDiff <= obsDiff)/N)  # divided by number of operations, this is the p-value
+  }
+
+}
+
+```
+
+
+## Fig. 1F: cell cycle UMAPs
+
+
+```{r}
+pdf("figures/cell_cycle_1F.pdf")
+DimPlot(seurat.fig1.epi, group.by = "Phase")
+dev.off()
+
+pdf("figures/cell_cycle_split_1F.pdf", width = 14)
+DimPlot(seurat.fig1.epi, group.by = "Phase", split.by = "genotype")
+dev.off()
+
+# Percentages and stats
+seurat.fig1.basal = seurat.fig1[, seurat.fig1$cell_types=="Basal"]
+Idents(seurat.fig1.basal) = seurat.fig1.basal$seurat_clusters
+
+
+```
+
+
