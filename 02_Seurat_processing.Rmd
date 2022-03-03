@@ -1,0 +1,273 @@
+---
+title: "Analyzing the scRNASeq data with Seurat"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Introduction
+
+
+```{r setup}
+library(Seurat)
+library(monocle3)
+library(ggplot2)
+library(SingleR)
+library(celldex)
+library(GSVA)
+library(biomaRt)
+
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+# Basic function to convert human to mouse gene names
+convertHumanGeneList <- function(x,human=human, mouse=mouse){
+  genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol",
+                 values = x , mart = human, attributesL = c("mgi_symbol"),
+                 martL = mouse, uniqueRows=T)
+  humanx <- unique(genesV2[, 2])
+  return(genesV2)
+}
+
+```
+
+## Seurat processing 
+
+In this vignette, we will process the data using [Seurat](https://satijalab.org/seurat/)
+We will perform the following steps - read in the SingleCellExperiment object from the previous vignette, 
+calculate percentage of mitochondrial and ribosomal genes. Next, we will normalize the data, 
+find 2000 variable features, followed by scaling the data, and using 
+dimension reduction techniques such as PCA, UMAP and finalizing our clusters.
+
+```{r}
+sce = readRDS("data/filtered_sce.rds")
+
+exprs_mat = assay(sce)
+cell_metadata = colData(sce)
+gene_annotation = rowData(sce)
+colnames(gene_annotation)[3] = "gene_short_name"
+
+seurat <- CreateSeuratObject(counts =  exprs_mat, project = "10X", assay = "RNA", min.cells = 0, min.features = 0)
+
+mito.genes <- grep("Mt", rownames(seurat))
+rb.genes <- grep("^Rp", rownames(seurat))
+percent.mito <- Matrix::colSums(seurat@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat@assays[["RNA"]])
+seurat$percent.mito <- percent.mito
+seurat$percent.rb <- percent.rb
+
+seurat$genotype <- cell_metadata$genotype
+seurat$genotype <- factor(x = seurat$genotype, levels = c("WT_intact", "PTEN_intact", "PTEN_castrate", "PTEN_castrate_4EBP1"))
+seurat$sample_number <- cell_metadata$sample_number
+seurat$replicate <- cell_metadata$replicate
+seurat$sample_id <- cell_metadata$sample_id
+
+
+# Normalize the data.
+seurat <- NormalizeData(seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+# find variable features
+seurat <- FindVariableFeatures(seurat, selection.method = "vst", nfeatures = 2000)
+
+# scale data
+all.genes <- rownames(seurat)
+seurat <- ScaleData(seurat, features = all.genes)
+# run PCA
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
+ElbowPlot(seurat, ndims = 50)
+
+seurat <- FindNeighbors(seurat, dims = 1:50)
+seurat <- RunUMAP(seurat, dims = 1:50)
+seurat <- FindClusters(seurat, resolution = 1.7)
+
+```
+
+##  SingleR to classify clusters
+ 
+In the next chunk of code, we will use R package [SingleR](https://bioconductor.org/packages/release/bioc/html/SingleR.html) to identify each cluster
+and then add it to our Seurat object.
+
+```{r}
+
+immgen <-celldex::ImmGenData()
+count_mat = seurat@assays[["RNA"]]@counts
+singler.immgen.500 <- SingleR(method = "cluster",
+                              test = count_mat,
+                              ref = immgen, ## ref dataset
+                              labels = immgen$label.main, ## Start by using main types
+                              genes = "de", ## Use de method as opposed to sd
+                              clusters = seurat@active.ident )
+
+# create a map for celltype labels :
+celltype_map = singler.immgen.500[, 4]
+names(celltype_map) = 0:19
+celltype_vec = seurat@active.ident
+seurat$expanded_celltype = celltype_map[celltype_vec]
+
+```
+
+## Define epithelial subtypes
+
+While SingleR gives us which cells are epithelial, we can use gene lists from 
+publications in the field to identify different subgroups of epithelial subtype
+First lets subset the Seurat object to contain only the cells which are Epithelial 
+
+```{r}
+seurat.epi = seurat[, (seurat$expanded_celltype == "Epithelial cells") ]
+```
+However, since these gene lists are from human - we will convert our mouse gene symbols
+to human gene symbols
+
+Next, we will calculate Average expression of genes for each cluster, 
+and perform GSVA , using the gene lists from paper to further define epitheial subtypes
+
+
+```{r}
+# calculates average expression of gene for each cluster 
+avg_exp = AverageExpression(object = seurat.epi, add.ident="genotype")
+avg_exp = avg_exp[[1]] # non-log values
+log2_avg_exp = log2(avg_exp +1) # log values. 
+
+lumsigs <- read.csv("epithelial_ID_sigs/luminal_sigs.csv")
+cd38 <- convertHumanGeneList(lumsigs$CD38_sig)
+sca1 <- lumsigs$Sca1_sig[lumsigs$Sca1_sig != "--"]
+cd38 <- intersect(cd38$MGI.symbol, rownames(seurat.epi))
+sca1 <- intersect(sca1, rownames(seurat.epi))
+
+science.sigs <- read_xlsx("epithelial_ID_sigs/Science_gene_expression.xlsx")
+science.basal <- science.sigs$Epi_Basal_1
+science.L1 <- science.sigs$Epi_Luminal_1
+science.L2 <- science.sigs$Epi_Luminal_2Psca
+science.L3 <- science.sigs$Epi_Luminal_3Foxi1
+
+strand.sigs <- read.csv("epithelial_ID_sigs/Strand_topgenes.csv")
+strand.basal <- strand.sigs$Basal
+strand.ure <- strand.sigs$Urethral
+strand.VP <- strand.sigs$VP
+strand.AP <- strand.sigs$AP
+strand.DLP <- strand.sigs$DLP
+strand.SV <- strand.sigs$SV
+
+## Functional signatures - AR and CCP
+AR <- c('Ar', 'Klk1', 'Nkx3-1', 'Pmeipa1', 'Ell2', 'Gnmt', 'Abcc4',
+        'Acsl3', 'Cenpn', 'AA986860', 'Tmprss2', 'Fkbp5', 'Herc3',
+        'Ptger4', 'Adam7', 'Eaf2', 'Zbtb10', 'Nnmt', 'Maf', 'Med28', 'Mphosph9')
+
+CCP <- c('Foxm1', 'Aspm', 'Tk1', 'Prc1', 'Cdc20', 'Bub1b', 'Pbk', 'Dtl',
+         'Cdkn3', 'Rrm2', 'Asf1b', 'Cep55', 'Cdk1', 'Dlgap5', 'Ska1', 'Rad51',
+         'Kif11', 'Birc5', 'Rad54l', 'Cenpm', 'Pclaf', 'Kif20a', 'Pttg1',
+         'Cdca8', 'Nusap1', 'Plk1', 'Cdca3', 'Orc6', 'Cenpf', 'Top2a', 'Mcm10')
+
+# perform GSVA
+
+strand.l <- list("Basal" = strand.basal, "Urethral" = strand.ure,
+                 "VP" = strand.VP,
+                 "L1" = science.L1,
+                 "Sca1hi" = sca1)
+strand.score <- as.data.frame(t (gsva(data.matrix(log2_avg_exp), strand.l) ))
+
+clust.heat <- pheatmap(strand.score, display_numbers = T)
+cell.heat <- pheatmap(t(strand.score), display_numbers = T)
+
+fun.l <- list("AR" = AR, "CCP" = CCP)
+fun.score <- as.data.frame(t(gsva(data.matrix(log2_avg_exp), fun.l)))
+
+## add scores for epithelial subtype to seurat object.
+celltype_map_epi = c("Progenitor", "Differentiated","Basal", "Progenitor", #cluster no :  0,2,3,6
+                 "Progenitor", # cluster-no :9
+                 "Basal", "Urethral", "Differentiated",  # cluster_no : 11, 12, 13
+                  "Urethral", "Basal", "Basal" ) # cluster no: 14, 18, 19
+names(celltype_map_epi) = c(0, 2, 3, 6, 9, 11, 12, 13, 14, 18, 19)
+
+celltype_vec = seurat.epi@active.ident
+seurat.epi$celltypes = celltype_map_epi[celltype_vec]
+
+
+celltype_map_full=c("Progenitor", "Macrophages", "Differentiated", "Basal",
+               "Fibroblast", "Basal", "Progenitor", "T cells", "Neutrophils",
+               "Progenitor",# cluster-9
+               "Stromal", "Basal", "Urethral", "Differentiated",
+               "Urethral", "B cells", "Differentiated", "Endothelial", "Basal", "Basal")
+names(celltype_map_full)=c(0:19)
+
+celltype_vec = seurat@active.ident
+seurat$celltypes = celltype_map_full[celltype_vec]
+```
+
+## Assigning cell cycle scores
+
+Seurat comes with list of cell cycle genes, we can pull them out
+and covert them to mouse gene symbols. 
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+s.genes <- convertHumanGeneList(s.genes, human=human, mouse=mouse)$MGI.symbol
+g2m.genes <- convertHumanGeneList(g2m.genes, human=human, mouse=mouse)$MGI.symbol
+
+## Assign S and G2/M scores, and assign predicted phase
+seurat.epi <- CellCycleScoring(seurat.epi, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+seurat <- CellCycleScoring(seurat, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+```
+
+
+## Save the Seurat object
+
+```{r}
+saveRDS(seurat, file = "data/seurat_cleaned.allcells.rds")
+saveRDS(seurat.epi, file = "data/seurat_cleaned.epi.rds")
+```
+
+## UMAP & Biomarker figures
+
+In the following section, we make figures to visualize the scRNASeq data. 
+
+```{r}
+
+pdf("figures/Seurat_pipeline.pdf", width =10)
+DimPlot(seurat, reduction = "umap")
+DimPlot(seurat, reduction = "umap", group.by="sample_number")
+DimPlot(seurat, reduction = "umap", group.by="genotype")
+dev.off()
+
+pdf("figures/Seurat_pipeline1_umap_split_by_genotype.pdf", width = 10, height =10)
+DimPlot(seurat, split.by="genotype", ncol=2 )
+dev.off()
+
+
+pdf("figures/Seurat_pipeline1_biomarkers.pdf")
+FeaturePlot(seurat, features = c("Cd19")) + ggtitle("B-cells - Cd19")
+FeaturePlot(seurat, features = c("Cd3e")) + ggtitle("T-cells - Cd3")
+FeaturePlot(seurat, features = c("S100a8")) + ggtitle("Neutrophils - S100a8")
+FeaturePlot(seurat, features = c("S100a9")) + ggtitle("Neutrophils - S100a9")
+
+FeaturePlot(seurat, features = c("C1qa")) + ggtitle("Macrophages - C1qa")
+FeaturePlot(seurat, features = c("Mgp")) + ggtitle("Endothelial - Mgp")
+
+FeaturePlot(seurat, features = c("Epcam")) + ggtitle("Epithelial - Epcam")
+FeaturePlot(seurat, features = c("Krt18")) + ggtitle("Epithelial - Krt18")
+
+FeaturePlot(seurat, features = c("Krt5")) + ggtitle("Epithelial:Basal - Krt5")
+FeaturePlot(seurat, features = c("Krt14")) + ggtitle("Epithelial:Basal - Krt14")
+
+FeaturePlot(seurat, features = c("Ppp1r1b")) + ggtitle("Epithelial:Progenitor - Ppp1r1b")
+FeaturePlot(seurat, features = c("Clu")) + ggtitle("Epithelial:Progenitor - Clu")
+
+FeaturePlot(seurat, features = c("Sbp")) + ggtitle("Epithelial:Differentiated - Sbp")
+FeaturePlot(seurat, features = c("Psca")) + ggtitle("Urethral - Psca")
+dev.off()
+
+
+pdf("figures/Seurat_pipeline1_umap_by_celltype.pdf", width = 10)
+DimPlot(seurat, reduction="umap", group.by="celltype", label=TRUE)+NoLegend()
+dev.off()
+
+
+```
+
+
+
