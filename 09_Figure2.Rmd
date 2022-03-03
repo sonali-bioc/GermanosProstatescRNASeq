@@ -1,0 +1,229 @@
+---
+title: "Reproducing Fig2"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this vignette, we generate Figure 2 of the manuscript.
+
+```{r setup}
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+library(writexl)
+library(viridis)
+library(readxl)
+library(MASS)
+
+seurat = readRDS("data/seurat_cleaned.allcells.rds")
+seurat.fig1 = seurat[, seurat$genotype %in% c("WT_intact", "PTEN_intact")]
+
+# Function to collapse data from samples to genotypes
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c(Freq = "mean"))
+ return(data_sum)
+}
+
+```
+
+## Fig 2A: GSEA plotting
+
+```{r}
+path.dat <- read_xlsx('tables/Plotting_new.xlsx', sheet = 2)
+path.dat$padj <- -log10(as.numeric(path.dat$FDR))
+path.dat$Term <- as.factor(path.dat$Term)
+path.dat <- arrange(path.dat, padj)
+path.dat$Term <- factor(path.dat$Term, 
+    levels = rev(c("GO_POSITIVE_REGULATION_OF_INNATE_IMMUNE_RESPONSE",
+      "GO_ANTIGEN_PROCESSING_AND_PRESENTATION",
+      "GO_RESPONSE_TO_TYPE_I_INTERFERON",
+      "GO_REGULATION_OF_RESPONSE_TO_CYTOKINE_STIMULUS",
+      "GO_REGULATION_OF_LEUKOCYTE_MIGRATION",
+      "GO_PLATELET_DEGRANULATION",
+      "GO_REGULATION_OF_GRANULOCYTE_CHEMOTAXIS",
+      "GO_RESPONSE_TO_INTERLEUKIN_12",
+      "REACTOME_INTERLEUKIN_4_AND_INTERLEUKIN_13_SIGNALING",
+      "GO_INTERLEUKIN_8_PRODUCTION")))
+
+path.dat$Cell <- factor(path.dat$Cell, levels = c("Basal", "Progenitor", "Differentiated"))
+
+pdf("GSEA_dotplot_imm_2A.pdf", height=4.5, width=8)
+path.imm
+dev.off()
+```
+
+## Fig 2B: Cell state immune UMAP
+```{r}
+seurat.fig1.imm = seurat.fig1[, seurat.fig1$cell_types %in% 
+    c("B-cells", "T-cells", "Dendritic cells", "Macrophages", "Neutrophils")]
+
+pdf("figures/cell_state_UMAP_2B.pdf")
+DimPlot(seurat.fig1.imm, group.by = "cell_states")
+dev.off()
+```
+
+## Fig 2C: Immune abundance
+```{r}
+cell.num1 <- table(seurat.fig1$cell_states, seurat.fig1$sample_id)
+cell.num <- t(t(cell.num1) / (colSums(cell.num1))) * 100
+cell.num <- as.data.frame(cell.num)
+cell.num <- separate(cell.num, Var2, c("genotype", "rep"), "-")
+cell.num$genotype <- factor(cell.num$genotype,levels = c("WT_intact",
+                                                         "PTEN_intact"))
+cell.num <- na.omit(cell.num)
+
+
+## Subset to immune cells
+
+imm.cells = c("B-cells", "CD8", "Delta-Gamma", "NKT", "TRM", "M2", "TAM", "DC", "MDSC")
+cell.num.imm = cell.num[cell.num$Var1 %in% imm.cells,]
+cell.num.imm$Var1 = factor(cell.num.imm$Var1, 
+  levels=c("B-cells", "CD8", "Delta-Gamma", "NKT", "TRM", "M2", "TAM", "DC", "MDSC"))
+
+b.imm <- data_summary(cell.num.imm, varname="Freq",
+                    groupnames=c("Var1", "genotype"))
+
+dot.cell.imm <- ggplot(cell.num.imm, aes(x = genotype, y = Freq)) +
+  geom_jitter(position=position_jitter(w=0.1, h=0.1), size = 2) +
+  scale_color_viridis(discrete = T, option = "viridis") +
+  geom_errorbar(data = b.imm, aes(x = genotype, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  geom_point(data = b.imm, mapping = aes(x =genotype, y= mean),
+    size=6, color="black", shape="-") +
+  ggtitle("") +
+  theme_classic() +
+  facet_wrap( ~ Var1, scale = "free_y") +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+dot.cell.imm
+
+pdf("figures/imm_abundance_states_2C_extra.pdf")
+dot.cell.imm
+dev.off()
+
+
+data = table(seurat.fig1$sample_id, seurat.fig1$cell_states)
+dataNorm = round(data/rowSums(data) * max(rowSums(data)), digits = 0)
+## Divide by replicate total to get proportion 
+## Then by max replicate total to normalize library size
+dataNorm$treatment = c(0,0,0,1,1) ## Add numerical treatment variable
+## 1 = WT, 0 == PTEN
+data
+dataNorm
+
+p = c()
+fit = glm.nb(B.cells~treatment, data = dataNorm)
+## Run neg binomial regression on B cells
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2]) ## Extract p-value from results
+fit = glm.nb(Basal~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(CD8~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(DC~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Delta.Gamma~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Differentiated~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Endothelial~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Fibroblasts~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(M2~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(MDSC~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(NKT~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Progenitor~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Stromal~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(TAM~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(TRM~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+
+## Add p-val and p-val corrections to dataframe
+res = cbind(data %>% t, dataNorm[,-16] %>% t, p %>% round(., digits = 10),
+             p.adjust(p, method = "fdr"),
+             p.adjust(p, method = "bonferroni")) %>%
+data.frame %>% cbind(colnames(data), .)
+
+colnames(res) = c("cellType", "WT_intact-1", "WT_intact-2", "WT_intact-3",
+                  "PTEN_intact-2", "PTEN_intact-3", "WT_intact-1_Norm", "WT_intact-2_Norm",
+                  "WT_intact-3_Norm", "PTEN_intact-2_Norm", "PTEN_intact-3_Norm",
+                  "p.value", "FDR.adjP", "BF.adjP")
+write.table(res, file = "imm_abundance_stats_2C.csv", sep = ",", 
+            quote = F, col.names = T, row.names = F)
+```
+
+## Fig 2E: Macrophage expression dotplot
+```{r}
+seurat.macro.epi = seurat.fig1[, seurat.fig1$cell_states %in% 
+      c("Differentiated", "Progenitor", "Basal", "TAM", "M2", "TRM")]
+
+seurat.macro.epi$cell_states = factor(seurat.macro.epi$cell_states, 
+      levels = c("Differentiated", "Progenitor", "Basal", "TAM", "M2", "TRM"))
+
+pdf("figures/Macro_epi_signaling_WT_IN_2E.pdf", width=8, height=5)
+DotPlot(seurat.macro.epi, features = c("Notch1", "Lamp1", "Cd74", 
+	    "C5ar1", "Wnt4", "Jag2", "Fam3c", "Mif", "Copa", "App", "Rps19"), 
+	group.by="cell_states", cols = "RdYlBu", split.by = "genotype") + 
+     RotatedAxis()
+dev.off()
+```
+
+## Fig 2F: MDSC-macrophage dotplot
+```{r}
+seurat.mdsc = seurat.fig1[, seurat.fig1$cell_states %in% c("MDSC", "TAM", "M2", "TRM")]
+seurat.mdsc$cell_states = factor(seurat.mdsc$cell_states, levels = c("TAM", "M2", "TRM", "MDSC"))
+pdf("figures/Macro_MDSC_signaling_WT_IN_2F.pdf", width=8, height=5)
+DotPlot(seurat.mdsc, features = c("Ccr1", "Ccl6", "Ccl7", "Ccl8", "Ccl9"), 
+	group.by="cell_states", cols = "RdYlBu", split.by = "genotype") + 
+  RotatedAxis()
+dev.off()
+```
+
+
+## Fig 2H: CD8 expression dotplot
+```{r}
+seurat.cd8 = seurat.fig1[, seurat.fig1$cell_states %in% 
+      c("Basal", "Progenitor", "Differentiated", "M2", "TAM", "CD8")]
+seurat.cd8$cell_states = factor(seurat.cd8$cell_states, levels = 
+      c("CD8", "TAM", "M2", "Differentiated", "Progenitor", "Basal"))
+
+pdf("figures/CD8_dotplot_2H.pdf", width=8, height=5)
+DotPlot(seurat.cd8, features = c("Fam3c", "Cxcl16", "Cd86", 
+	"Pdcd1", "Cxcr6", "Ctla4", "Cd28"), 
+  group.by="cell_states", cols = "RdYlBu", split.by = "genotype") + 
+  RotatedAxis()
+dev.off()
+```
+
+
