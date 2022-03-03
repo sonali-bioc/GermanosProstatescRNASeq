@@ -13,10 +13,6 @@ output:
 This github repository contains code to reproduce the analysis in our upcoming paper 
 "Defining cellular population dynamics at single cell resolution during prostate cancer progression".
 
-## Downloading the data 
-
-The data for this manuscript is available in GEO at [GSE171336](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE171336)
-
 ## Tools used for the Analysis 
 
 1. [SingleCellExperiment](https://bioconductor.org/packages/release/bioc/html/SingleCellExperiment.html) for processing scRNASeq data
