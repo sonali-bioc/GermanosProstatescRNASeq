@@ -1,0 +1,110 @@
+---
+title: "CellphoneDB
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+
+## Introduction
+
+In this vignette, we analyze our data with cellphoneDb and then make figures to visualize the interactions.
+
+##  cellphoneDb on our scRNASeq data
+First we build the docker image of cellphonedb
+
+```{}
+singularity build mycellphonedb.sif docker://ydevs/cellphonedb:2.1
+
+```
+Next, we prepare our data in a format that is acceptable by cellphoneDb
+
+```{r}
+
+library(biomaRt)
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+library(Seurat)
+seurat = readRDS("data/seurat_cleaned.allcells.rds")
+scale_data = seurat@assays$RNA@scale.data
+meta = cbind(cell = rownames(seurat@meta.data), cell_type=seurat@meta.data$cell_types)
+
+# Basic function to convert human to mouse gene names
+convert_Mouse_to_Human <- function(genes){
+  df =  getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol",
+               values = genes ,mart = mouse,
+               attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+  df
+}
+gene_df = convert_Mouse_to_Human(rownames(scale_data))
+
+# next keep only unique genes.
+goi = unique(gene_df[,2])
+keep_idx2 = match(goi, gene_df[,2])
+
+scale_data = scale_data[keep_idx2, ]
+gene_df = gene_df[keep_idx2, ]
+
+rownames(scale_data) = gene_df[, "HGNC.symbol"]
+
+want_cells = c("Basal", "Progenitor", "Differentiated", "Macrophages", "Dendritic cells", "Neutrophils", "T-cells")
+want_idx = which(meta_all$cell_type %in% want_cells)
+
+scale_data = scale_data[, want_idx]
+# make one for each genotype.
+
+test_df = seurat@meta.data
+test_df = test_df[which(test_df$cell_types %in% want_cells), ]
+
+wt_intact_idx= rownames(test_df[which(test_df$genotype=="WT_intact"), ])
+pten_intact_idx= rownames(test_df[which(test_df$genotype=="PTEN_intact"), ])
+pten_cx_idx= rownames(test_df[which(test_df$genotype=="PTEN_castrate"), ])
+pten_cx_4ebp1_idx= rownames(test_df[which(test_df$genotype=="PTEN_castrate_4EBP1"), ])
+
+wt_intact = scale_data[, match(wt_intact_idx, colnames(scale_data))]
+pten_intact = scale_data[, match(pten_intact_idx, colnames(scale_data))]
+pten_cx = scale_data[, match(pten_cx_idx, colnames(scale_data))]
+pten_cx_4ebp1 = scale_data[, match(pten_cx_4ebp1_idx, colnames(scale_data))]
+
+meta_wt_intact = meta[ match(wt_intact_idx, meta[,1]), ]
+meta_pten_intact = meta[ match(pten_intact_idx, meta[,1]), ]
+meta_pten_cx = meta[ match(pten_cx_idx, meta[,1]), ]
+meta_pten_cx_4ebp1 = meta[ match(pten_cx_4ebp1_idx, meta[,1]), ]
+
+write.table(wt_intact, "~/hsiehlab/Sonali/tools/cellphoneDB/scale_counts_wt_intact.txt", 
+            sep ="\t", quote=FALSE, row.names=TRUE, col.names=TRUE)
+write.table(pten_intact, "~/hsiehlab/Sonali/tools/cellphoneDB/scale_counts_pten_intact.txt", 
+            sep ="\t", quote=FALSE, row.names=TRUE, col.names=TRUE)
+write.table(pten_cx, "~/hsiehlab/Sonali/tools/cellphoneDB/scale_counts_pten_cx.txt", 
+            sep ="\t", quote=FALSE, row.names=TRUE, col.names=TRUE)
+write.table(pten_cx_4ebp1, "~/hsiehlab/Sonali/tools/cellphoneDB/scale_counts_pten_cx_4ebp1.txt", 
+            sep ="\t", quote=FALSE, row.names=TRUE, col.names=TRUE)
+
+write.table(meta_wt_intact, "~/hsiehlab/Sonali/tools/cellphoneDB/meta_wt_intact.txt", 
+            sep ="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+write.table(meta_pten_intact, "~/hsiehlab/Sonali/tools/cellphoneDB/meta_pten_intact.txt", 
+            sep ="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+write.table(meta_pten_cx, "~/hsiehlab/Sonali/tools/cellphoneDB/meta_pten_cx.txt", 
+            sep ="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+write.table(meta_pten_cx_4ebp1, "~/hsiehlab/Sonali/tools/cellphoneDB/meta_pten_cx_4ebp1.txt", 
+            sep ="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+```
+
+Finally, we run cellphoneDb on each genotype. 
+
+
+```{}
+ singularity run --bind ${PWD}:/DATA -W /DATA mycellphonedb.sif cellphonedb method statistical_analysis meta_wt_intact.txt scale_counts_wt_intact.txt --counts-data hgnc_symbol --project-name=wt_intact --threads 8
+
+ singularity run --bind ${PWD}:/DATA -W /DATA mycellphonedb.sif cellphonedb method statistical_analysis meta_pten_intact.txt scale_counts_pten_intact.txt --counts-data hgnc_symbol --project-name=pten_intact --threads 8
+
+ singularity run --bind ${PWD}:/DATA -W /DATA mycellphonedb.sif cellphonedb method statistical_analysis meta_pten_cx.txt scale_counts_pten_cx.txt --counts-data hgnc_symbol --project-name=pten_cx --threads 8
+
+ singularity run --bind ${PWD}:/DATA -W /DATA mycellphonedb.sif cellphonedb method statistical_analysis meta_pten_cx_4ebp1.txt scale_counts_pten_cx_4ebp1.txt --counts-data hgnc_symbol --project-name=pten_cx_4ebp1 --threads 8
+
+```
