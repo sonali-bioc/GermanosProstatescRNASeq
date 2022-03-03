@@ -1,0 +1,139 @@
+---
+title: "Reproducing Fig5"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this vignette, we generate Figure 5 of the manuscript.
+
+```{r setup}
+
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+library(writexl)
+
+seurat = readRDS("seurat_cleaned.allcells.rds")
+seurat.pten = seurat[, seurat$genotype != "WT_intact"]
+seurat.fig5 = seurat[, seurat$genotype %in% c("PTEN_castrate", "PTEN_castrate_4EBP1")]
+seurat.fig5.trans = seurat.fig5[, which(as.matrix(seurat.fig5$RNA["rtTA-eGFP",]>0))]
+
+```
+
+## Fig 5B: UMAPs
+```{r}
+pdf("figures/UMAPs_5B.pdf")
+DimPlot(seurat.fig5, group.by = "cell_types")
+DimPlot(seurat.fig5, group.by = "cell_types", split.by = "genotype")
+DimPlot(seurat.fig5, group.by = "genotype")
+dev.off()
+```
+
+## Fig 5C: Transgene violin plot
+```{r}
+seurat.pten.epi = seurat.pten[, seurat.pten$cell_types %in% 
+                          c("Basal", "Progenitor", "Differentiated")]
+seurat.pten.trans = seurat.pten.epi[, which(as.matrix(seurat.pten.epi$RNA["rtTA-eGFP",]>0))]
+
+seurat.pten.trans$cell_types = factor(seurat.pten.trans$cell_types,
+                          levels = c("Basal", "Progenitor", "Differentiated"))
+
+pdf("figures/transgene_violin_5C.pdf")
+VlnPlot(seurat.pten.trans, "rtTA-eGFP", group.by = "genotype")
+VlnPlot(seurat.pten.trans, "rtTA-eGFP", group.by = "cell_types")
+dev.off()
+```
+
+
+## Fig 5D: GSEA plot of transgene-only DEGs
+
+```{r}
+seurat.fig5.epi = seurat.fig5[, seurat.fig5$cell_types %in% c("Basal", "Progenitor")]
+seurat.fig5.trans = seurat.fig5.epi[, which(as.matrix(seurat.fig5.epi$RNA["rtTA-eGFP",]>0))]
+
+path.dat <- read_xlsx('CX_4E_transgene_plotting.xlsx', sheet = 1)
+path.dat$padj <- -log10(as.numeric(path.dat$p.adjust))
+path.dat$ID <- as.factor(path.dat$ID)
+path.dat <- arrange(path.dat, padj)
+path.dat$ID <- factor(path.dat$ID, levels = rev(c("GO_TRANSLATIONAL_INITIATION", 
+"GO_CYTOPLASMIC_TRANSLATION", "GO_RIBOSOME_BIOGENESIS",
+"GO_RIBOSOME_ASSEMBLY", "GO_INTRINSIC_APOPTOTIC_SIGNALING_PATHWAY", "GO_CELL_CYCLE_ARREST", 
+"GO_MITOTIC_CELL_CYCLE_ARREST","GO_ATP_METABOLIC_PROCESS", "GO_ELECTRON_TRANSPORT_CHAIN", 
+"GO_CELLULAR_RESPIRATION", "HALLMARK_MTORC1_SIGNALING")))
+
+path.dat$Category <- factor(path.dat$Category, levels = c("Upregulated", "Downregulated"))
+path.epi <- ggplot(path.dat, aes(x = Category, y=ID,size=GeneRatio, color=padj)) +
+  geom_point() +
+  scale_color_gradient(low="blue",
+                        high = "red")+
+  ylab("") + xlab("") +
+  theme_classic() +
+  theme(axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 12,
+                                   face = "bold")) +
+  labs(size="Gene Ratio", colour="-log10(FDR)")
+
+pdf("figures/GSEA_dotplot_transgene_5D.pdf", height=4, width = 6.5)
+path.epi
+dev.off()
+```
+
+
+## Fig 5F: Dotplot of EGFR gene expression
+
+```{r}
+seurat.pten.egfr = seurat.pten[, seurat.pten$cell_types %in% 
+                c("Basal", "Progenitor", "Fibroblasts")]
+seurat.fig5.egfr = seurat.fig5[, seurat.fig5$cell_types %in%
+                c("Basal", "Progenitor", "Fibroblasts")]
+
+seurat.pten.egfr$cell_types = factor(seurat.pten.egfr$cell_types, 
+                levels = c("Basal", "Progenitor", "Fibroblasts"))
+seurat.fig5.egfr$cell_types = factor(seurat.fig5.egfr$cell_types, 
+                levels = c("Basal", "Progenitor", "Fibroblasts"))
+
+egfr = c("Egfr", "Nrg1", "Grn", "Tgfb1", "Mif", "Copa", "Hbegf", "Areg")
+
+pdf("figures/egfr_dotplot_pten_5F.pdf", height = 5, width = 7)
+DotPlot(seurat.pten.egfr, features = egfr, group.by = "cell_types", 
+        split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+```
+
+
+## Fig 5H: Dotplot of TNF gene expression
+```{r}
+seurat.fig5.tnf = seurat.fig5[, seurat.fig5$cell_states %in% 
+                c("Basal", "Progenitor", "Fibroblasts", "M2", "TAM", "MDSC")]
+
+seurat.fig5.tnf$cell_states = factor(seurat.fig5.tnf$cell_states, 
+        levels = c("Basal", "Progenitor", "Fibroblasts", "M2", "TAM", "MDSC"))
+
+tnf = c("Vsir", "Ptprs", "Celsr2", "Ripk1", "Notch1", "Dag1", "Tnfrsf1a")
+
+pdf("figures/tnf_dotplot1_5H.pdf", height = 3.5, width = 6.5)
+DotPlot(seurat.fig5.egfr, features = tnf, group.by = "cell_types", 
+        split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+
+pdf("figures/tnf_dotplot2_5H.pdf", height = 6, width = 7)
+DotPlot(seurat.fig5.tnf, features = tnf, group.by = "cell_states", 
+        split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+
+pdf("figures/egfr_dotplot_fig5_5F.pdf", height = 4, width = 7)
+DotPlot(seurat.fig5.egfr, features = egfr, group.by = "cell_types", 
+        split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+```
