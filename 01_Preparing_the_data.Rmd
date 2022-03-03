@@ -1,0 +1,222 @@
+---
+title: "Preparing the data"
+author: "Alex Germanos, Robert A. Amezquita, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup}
+library(tidyverse)
+library(annotables)
+library(scater)
+library(scran)
+library(limma)
+library(BiocParallel)
+library(BiocNeighbors)
+library(DropletUtils)
+library(batchelor)
+library(SingleR)
+```
+
+
+# Introduction
+
+In this vignette, we show all steps that went into making our final object
+
+## Aligning the data with kallisto and creating a SIngleCellExperiment
+
+The following code was used to process all samples using kallisto bustools.
+
+```{}
+INDEX=reference/mus_musculus/Mus_musculus_index.idx
+TXP2GENE=reference/mus_musculus/transcripts_to_genes.txt
+TENX_WHITELIST=10xv2_whitelist.txt
+
+kallisto bus -i $INDEX -o $KALLISTOBUS_OUTDIR/$SDIR -x 10xv2 -t $THREADS ${R1[$I]} ${R2[$I]}"
+cd $KALLISTOBUS_OUTDIR/$SDIR; mkdir -p genecount tmp
+bustools correct -w $TENX_WHITELIST -p output.bus | bustools sort -T tmp/ -t 4 -p - | bustools count -o genecount/genes -g $TXP2GENE -e matrix.ec -t transcripts.txt --genecounts -
+```
+
+
+In the below code chunk, we reads in the output from kallisto bustools and create a SingleCellExperiment object.
+
+```{r}
+kdir <- paste0(list.files('data-raw/kallisto-bustools/', full.names = TRUE),
+               '/genecount')
+kname <- list.files('data-raw/kallisto-bustools/')
+
+## Read kallisto data
+.read_kallisto_bustools <- function(d, name) {
+  barcodes <- read_tsv(paste0(d, '/genes.barcodes.txt'), col_names = FALSE)
+  cells <- paste0(name, '.', barcodes$X1)
+  genes <- read_tsv(paste0(d, '/genes.genes.txt'), col_names = FALSE)
+  genes <- str_split(genes$X1, '\\.', simplify = TRUE)[, 1]
+  mtx <- t(Matrix::readMM(paste0(d, '/genes.mtx')))
+  colnames(mtx) <- cells
+  rownames(mtx) <- genes
+  return(mtx)
+}
+mtx_l <- map2(kdir, kname, .read_kallisto_bustools)
+mat_filt_l = map(mtx_l, function(x) {
+  ## Run emptyDrops to filter out empty droplets
+  e = emptyDrops(x)
+  ## NAs cause error when we subset, so we remove them
+  keep = e[is.na(e$FDR) == FALSE,]
+  y = x[, rownames(keep)]
+  return(y)
+})
+megamat = do.call(cbind, mat_filt_l)
+sce = SingleCellExperiment(assays = SimpleList(counts = megamat))
+```
+
+
+## Adding the metadata 
+
+```{r}
+
+df = str_split(colnames(sce), '\\.', simplify = TRUE)
+df = as.data.frame(df)
+colnames(df) <- c("sample_ID", "barcodes")
+
+meta <- read_csv("data/sample_metadata.csv") %>% print  # Import table with metadata
+
+sample_info <- left_join(df, meta, by = "sample_ID")   # Join sample name table with metadata table
+
+## Add metadata slots to the SCE object
+sce$sample_number = sample_info$sample_ID # unique for each sample but not informative (e.g. A12)
+sce$genotype = sample_info$genotype
+sce$replicate = sample_info$replicate
+sce$n_mice = sample_info$n_mice
+
+cond.rep <- paste(sce$genotype, sce$replicate, sep = "-") # Create unique label per replicate
+sce$sample_id <- cond.rep # Unique for each sample and informative (e.g. WT_intact-1)
+```
+
+## filtering the cells 
+
+Here we read in the annotation file, add 2 transgenes and then remove gene ids with duplicate gene names.
+We also add filters for mitochondrial genes and add cutoffs for total molecules dectected within a cell and 
+number of genes detected in each cell. 
+
+```{r}
+grcm38 = import("Mus_musculus.GRCm38.96.gtf")
+grcm38 = grcm38[which(grcm38$type=="gene"), ]
+grcm38 = as.data.frame(grcm38)
+colnames(grcm38)[10] = "ensgene"
+grcm38 = grcm38[, c( "gene_name", "seqnames", "start", "end", "strand", "gene_biotype", "ensgene")]
+
+tmp <- left_join(data.frame(ensgene = rownames(sce)), grcm38, by = 'ensgene')
+## Get rid of duplicate values
+tmp <- tmp[duplicated(tmp$ensgene) == FALSE,]
+tmp$strand <- ifelse(tmp$strand == -1, '-', '+')
+## We replace NAs with gene names and description for our transgenes
+tmp[1,2] = "Cre"
+tmp[1,3] = 0
+tmp[1,4] = 1362
+tmp[1,5] = 2393
+tmp[1,6] = "+"
+tmp[1,7] = "transgene"
+
+tmp[2,2] = "rtTA_eGFP"
+tmp[2,3] = 0
+tmp[2,4] = 1
+tmp[2,5] = 1361
+tmp[2,6] = "+"
+tmp[2,7] = "transgene"
+
+tmp_discard <- which(duplicated(tmp$gene_name))
+tmp_clean = tmp[-c(tmp_discard), ]
+
+sce <- sce[tmp_clean$ensgene,]
+rowranges <- makeGRangesFromDataFrame(tmp_clean, keep.extra.columns = TRUE)
+
+## We just use the dataframe to create metadata slots without converting 
+## to a GRanges object
+rowData(sce) <- rowranges
+
+## Change gene names to gene symbols for readability
+rownames(sce) <- rowData(sce)$gene_name
+
+is.mito.alt <- grep("^mt", rowData(sce)$gene_name)
+df <- perCellQCMetrics(sce, subsets=list(Mito=is.mito.alt))
+qc.lib <- isOutlier(log(df$sum), nmads=3, type="lower", batch = sce$sample_id)
+qc.nexprs <- isOutlier(log(df$detected), nmads=3,
+                       type="lower", batch = sce$sample_id)
+qc.mito <- isOutlier(df$subsets_Mito_percent, nmads=3, type="higher", batch = sce$sample_id)
+
+
+## Look at the thresholds set by previous operations
+attr(qc.lib, "thresholds")
+attr(qc.nexprs, "thresholds")
+attr(qc.mito, "thresholds")
+
+## Discard cells that were outliers
+df$discard <- qc.lib | qc.nexprs | qc.mito
+colData(sce) <- cbind(colData(sce), df)
+
+sce <- sce[,!df$discard]
+
+
+## No cell with fewer than 500 UMIs or more than 25000 UMIs
+keep1 = between(sce$sum, 500, 25000)
+## No cell with fewer than 200 genes or more than 5000 genes
+keep2 = between(sce$detected, 200, 5000)
+
+sce = sce[, keep1 ]
+sce = sce[, keep2]
+
+# Also remove cells with 0 count genes.
+gene.counts <- rowSums(counts(sce))
+sce <- sce[gene.counts >0, ]
+```
+
+## Quality control plots
+
+We make some quality control plots at both the sample and genotype level, to check that our filtering 
+worked as expected.
+
+```{r}
+
+plot_df = as.data.frame(colData(sce))
+p1 = ggplot(plot_df, aes( sum, factor(genotype))) +
+  geom_violin( aes(fill = factor(genotype))) +
+  theme_bw() + xlab("total counts") + ylab("Genotype") +
+  ggtitle("Violin Plot showing total counts by Genotype")
+
+p2 = ggplot(plot_df, aes( sum, factor(sample_id))) +
+  geom_violin( aes(fill = factor(sample_id))) +
+  theme_bw() + xlab("total counts") + ylab("Sample") +
+  ggtitle("Violin Plot showing total counts by Sample")
+
+
+p3= ggplot(plot_df, aes( detected, factor(genotype))) +
+  geom_violin( aes(fill = factor(genotype))) +
+  theme_bw() + xlab("total counts") + ylab("Genotype") +
+  ggtitle("Violin Plot showing genes detected by Genotype")
+
+p4 = ggplot(plot_df, aes( detected, factor(sample_id))) +
+  geom_violin( aes(fill = factor(sample_id))) +
+  theme_bw() + xlab("Genes detected") + ylab("Sample") +
+  ggtitle("Violin Plot showing genes detected by Sample")
+
+pdf(file.path(resdir, "qc_plots.pdf"), height = 10)
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+dev.off()
+
+```
+
+## Save the filtered SCE 
+
+Finally , we save the final object for further processing.
+
+```{r}
+saveRDS(sce, file.path(resdir, "filtered_sce.rds"))
+```
+
+
