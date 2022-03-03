@@ -1,0 +1,182 @@
+---
+title: "Differentially expressed Genes and enrichment analysis"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Introduction
+
+In this vignette, we will first perform differential gene expression analysis between various clusters and subtypes
+followed by enrichment analysis for the differentially expressed genes. 
+
+```{r setup}
+library(Seurat)
+library(readxl)
+library(GSVA)
+library(biomaRt)
+library(writexl)
+library(enrichR)
+
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+# Basic function to convert human to mouse gene names
+convert_Mouse_to_Human <- function(genes){
+ df =  getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol",
+        values = genes ,mart = mouse,
+        attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+ unique(df[, "HGNC.symbol"])
+}
+
+# function for performing enrichment analysis
+my_enrichment_function = function(goi, title, res_folder){
+        extdata = "msigdb/msigdb_v7.2_files_to_download_locally/msigdb_v7.2_GMTs"
+        mf_db <- read.gmt(file.path(extdata, "c5.go.mf.v7.2.symbols.gmt"))
+        cc_db <- read.gmt(file.path(extdata, "c5.go.cc.v7.2.symbols.gmt"))
+        bp_db <- read.gmt(file.path(extdata, "c5.go.bp.v7.2.symbols.gmt"))
+        kegg_db <- read.gmt(file.path(extdata, "c2.cp.kegg.v7.2.symbols.gmt"))
+        biocarta_db <- read.gmt(file.path(extdata, "c2.cp.biocarta.v7.2.symbols.gmt"))
+        reactome_db <- read.gmt(file.path(extdata, "c2.cp.reactome.v7.2.symbols.gmt"))
+        hallmark_db <- read.gmt(file.path(extdata, "h.all.v7.2.symbols.gmt"))
+        c6_db <- read.gmt(file.path(extdata, "c6.all.v7.2.symbols.gmt"))  # oncogenic gene sets
+        c7_db <- read.gmt(file.path(extdata, "c7.all.v7.2.symbols.gmt")) # immunologic signature gene sets
+
+        c5_cc_res <- as.data.frame(enricher(goi, TERM2GENE=cc_db))
+        c5_mf_res <- as.data.frame(enricher(goi, TERM2GENE=mf_db))
+        c5_bp_res <- as.data.frame(enricher(goi, TERM2GENE=bp_db))
+        c2_kegg_res <- as.data.frame(enricher(goi, TERM2GENE=kegg_db))
+        c2_biocarta_res <- as.data.frame(enricher(goi, TERM2GENE=biocarta_db))
+        c2_reactome_res <- as.data.frame(enricher(goi, TERM2GENE=reactome_db))
+        hallmark_res <- as.data.frame(enricher(goi, TERM2GENE=hallmark_db))
+        c7_res <- as.data.frame(enricher(goi, TERM2GENE=c7_db) )
+        c6_res <- as.data.frame(enricher(goi, TERM2GENE=c6_db))
+
+        final_res = list(c2_kegg_res, c2_biocarta_res, c2_reactome_res ,
+           c5_bp_res, c5_mf_res, c5_cc_res,
+           c6_res, c7_res, hallmark_res)
+        names(final_res) = c("C2_kegg", "C2_BioCarta", "C2_Reactome",
+          "C5_GO_Biological_Process", "C5_GO_Molecular_Function", "C5_GO_Cellular_Component",
+          "c6_oncogenic_signature", "C7_immunologic", "Hallmark")
+
+        write_xlsx(x = final_res, path = file.path(res_folder, title) )
+  final_res
+}
+
+# function for performing deg+ go analysis for each cell type
+
+docelltype_analysis = function(seurat, test_group, control_group, cell_types,
+    log2_thres = log2(1.25), fdr_thres=0.05, res_folder = res_folder){
+
+   for(i in cell_types){
+       message("Starting analysis for cell type: ", i)
+       seurat.cell = seurat[, (seurat$cell_types == i) ]
+
+       # add check to make sure enough number of cells are present in test and control group
+       ch1 = length(which(seurat.cell$genotype==test_group))
+       ch2 = length(which(seurat.cell$genotype==control_group))
+
+        if(ch1 < 100 | ch2 < 100 ){
+          message("Too few cells in test/control group for cell=", i)
+          next
+        }
+
+       markers = FindMarkers( seurat.cell, ident.1 = test_group,
+                    ident.2 =control_group, group.by ="genotype",
+                    test.use = "wilcox")
+       markers$FDR = p.adjust(markers$p_val, method = "fdr")
+       markers$gene = rownames(markers)
+
+       # extract up and down regulated genes , these would go into GSEA and pathway analysis.
+       up_reg_markers = markers[which(markers$avg_log2FC > log2_thres & markers$FDR < fdr_thres), ]
+       down_reg_markers = markers[which(markers$avg_log2FC < -log2_thres & markers$FDR < fdr_thres), ]
+        markers = markers[which(markers$FDR < fdr_thres),]
+       # make file containing 3 sheets - all genes, up and down-reg genes. 
+       fname = paste0("DEGs_wilcox_for_", i , "_in_", test_group, "_vs_", control_group, ".xlsx")
+
+       lst = list(all_de_results = markers,
+             up_regulated = up_reg_markers ,
+             down_regulated = down_reg_markers )
+
+       write_xlsx(x = lst, path = file.path(res_folder, fname) )
+
+
+       # do gsea analysis.
+       if(length(rownames(up_reg_markers)) >=50){
+           message("GSEA analysis for up-regulated genes:", length(rownames(up_reg_markers)) )
+           up_genes.hs = convert_Mouse_to_Human(rownames(up_reg_markers))
+           up_res1 = my_enrichment_function(up_genes.hs,
+               title=paste0("Enrichr_UP_reg_genes_from_", fname), res_folder=res_folder)
+       }
+
+       if(length(rownames(down_reg_markers))>=50){
+            message("GSEA analysis for down-regulated genes", length(rownames(down_reg_markers)))
+            down_genes.hs = convert_Mouse_to_Human(rownames(down_reg_markers))
+            down_res1 = my_enrichment_function(down_genes.hs,
+                title=paste0("Enrichr_DN_reg_genes_from_", fname), res_folder=res_folder)
+       }
+   }
+}
+
+
+
+```
+
+## Differential Gene expression analysis
+
+```{r}
+
+seurat.epi= readRDS("data/seurat_cleaned.epi.rds")
+
+docelltype_analysis(seurat.epi,
+        test_group= "PTEN_intact",  control_group="WT_intact",
+        cell_types = epi_cell_types, res_folder = res_folder)
+
+docelltype_analysis(seurat.epi,
+        test_group= "PTEN_castrate",  control_group="PTEN_intact",
+        cell_types = epi_cell_types, res_folder = res_folder)
+
+docelltype_analysis(seurat.epi,
+        test_group= "PTEN_castrate_4EBP1",  control_group="PTEN_castrate",
+        cell_types = epi_cell_types, res_folder = res_folder)
+
+```
+
+Next, we filtered cells with only the transgene , and performed the same comparison.
+
+```{r}
+seurat.trans = seurat.epi[, which(as.matrix(seurat.epi$RNA["rtTA-eGFP",]>0))]
+
+docelltype_analysis(seurat.trans,
+        test_group= "PTEN_castrate_4EBP1",  control_group="PTEN_castrate",
+        cell_types = epi_cell_types, res_folder = res_folder)
+
+```
+We also performed a similar analysis on the basal clusters, the hypo-proliferative 
+and hyper-proliferative clusters.
+
+```{r}
+
+seurat.basal = seurat.epi[, seurat.epi$genotype == "PTEN_intact" & seurat.epi$seurat_clusters %in% c(0,15)]
+
+basal.markers <- FindAllMarkers(seurat.basal , logfc.threshold = 0.25)
+basal.markers = basal.markers[basal.markers$cluster==0,]
+
+basal.markers$FDR = p.adjust(basal.markers$p_val, method = "fdr")
+basal.markers$gene = rownames(basal.markers)
+
+basal.up = basal.markers[which(basal.markers$avg_log2FC > log2(1.25) & basal.markers$FDR < 0.05), ]
+basal.down = basal.markers[which(basal.markers$avg_log2FC < -log2(1.25) & basal.markers$FDR < 0.05), ]
+
+up_genes.hs = convert_Mouse_to_Human(rownames(basal.up))
+up_res1 = my_enrichment_function(up_genes.hs,
+        title="GSEA_UP_basal_0.xlsx", res_folder=res_folder)
+
+dn_genes.hs = convert_Mouse_to_Human(rownames(basal.down))
+dn_res1 = my_enrichment_function(dn_genes.hs,
+       title="GSEA_DN_basal_0.xlsx", res_folder=res_folder)
+
+```
