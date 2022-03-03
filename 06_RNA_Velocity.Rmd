@@ -1,0 +1,182 @@
+---
+title: "RNA Velocity"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Introduction
+
+In this vignette, we perform RNA velocity analysis using [velocyto.R](https://github.com/velocyto-team/velocyto.R)
+
+## Prepare data for velocity analysis. 
+
+First we will create the spliced and unspliced matrices from kallisot output
+
+```{r}
+
+sample_lst = paste0("Sample_", c( "A8",  "B5", "B8", "C5", "C8" ,
+                                  "D12", "D5" , "F6", "G6", "H6"))
+
+big_lst = lapply(sample_lst, function(d){
+  message(d)
+  c(spliced, unspliced) %<-% read_velocity_output(spliced_dir = file.path(d, "spliced"),
+                                                  spliced_name = "s",
+                                                  unspliced_dir = file.path(d, "unspliced"),
+                                                  unspliced_name = "u")
+})
+
+
+
+spl = lapply(big_lst, "[[", "spliced")
+spl = lapply(1:length(spl), function(idx){
+  df = spl[[idx]]
+  colnames(df) = paste0(colnames(df),  "_", gsub("Sample_", "", sample_lst[idx]))
+  df
+})
+
+
+unspl = lapply(big_lst, "[[", "unspliced")
+unspl = lapply(1:length(unspl), function(idx){
+  df = unspl[[idx]]
+  colnames(df) = paste0(colnames(df),  "_", gsub("Sample_", "", sample_lst[idx]))
+  df
+})
+
+
+spliced = do.call(cbind, spl)
+unspliced = do.call(cbind, unspl)
+
+# use only cells & genes from Alex's original analysis.
+seurat= readRDS("/fh/fast/hsieh_a/Single_cell_analysis_Gottardo_Hsieh_Lab/cleaned_Sonali_Analysis/seurat_cleaned.allcells.rds")
+
+cs = colnames(seurat)
+cs = gsub("Sample_", "", cs)
+cs = strsplit(cs, "[.]")
+cs  = sapply(cs, function(x) paste0(c( x[2], "_", x[1]), collapse=""))
+midx = match(cs, colnames(spliced))
+midx2 = match(cs, colnames(unspliced))
+
+spliced = spliced[, midx]
+unspliced = unspliced[ ,midx2]
+
+grcm38 = import("Mus_musculus.GRCm38.96.gtf")
+gtf = grcm38[which(grcm38$type=="gene"), ]
+gtf = grcm38
+gidx = match(rownames(seurat)[-c(1:2)], gtf$gene_name)
+gene_names = gtf[gidx, c("gene_name","gene_id")]
+
+identical(rownames(spliced), rownames(unspliced)) #[1] TRUE
+goi = rownames(spliced)
+goi1 =sapply( strsplit(goi, "[.]"), function(x) x[1])
+
+common_genes = intersect(goi1, gene_names$gene_id )
+
+sf = spliced[match(common_genes, goi1), ]
+uf = unspliced[match(common_genes, goi1), ]
+
+# create a seurat object from spliced and unspliced data !! :) :)
+seu <- CreateSeuratObject(sf, assay = "sf")
+seu[["uf"]] <- CreateAssayObject(uf)
+
+seu@meta.data$orig_name = colnames(seurat) # add different type of style name
+seu@meta.data$genotype = seurat@meta.data$genotype
+seu@meta.data$sample_number = seurat@meta.data$sample_number
+seu@meta.data$sample_id = seurat@meta.data$sample_id
+seu@meta.data$orig_cell_type = seurat@meta.data$cell_types
+seu@meta.data$orig_seurat_clusters = seurat@meta.data$seurat_clusters
+
+
+# perform SCTransform normalization on both spliced and unspliced matrices
+seu <- SCTransform(seu, assay = "sf", new.assay.name = "spliced")
+seu <- SCTransform(seu, assay = "uf", new.assay.name = "unspliced")
+
+# seurat processing. 
+DefaultAssay(seu) <- "spliced"
+seu <- RunPCA(seu, verbose = FALSE, npcs = 70)
+ElbowPlot(seu, ndims = 70)
+seu <- RunTSNE(seu, dims = 1:50, verbose = FALSE)
+seu <- RunUMAP(seu, dims = 1:50, umap.method = "uwot")
+seu <- FindNeighbors(seu, verbose = FALSE)
+seu <-  FindClusters(resolution = 1, verbose = FALSE) # Louvain
+
+# add old umap
+orig.umap = Embeddings(object = seurat, reduction = "umap")
+rownames(orig.umap) = colnames(seu)
+colnames(orig.umap) = paste0("orig_", colnames(orig.umap))
+
+seu@meta.data = cbind(seu@meta.data, orig.umap)
+
+orig.umap = data.matrix(orig.umap)
+orig_dim <- CreateDimReducObject(
+  embeddings = orig.umap,
+  key = "origumap", assay = "spliced")
+seu[["orig_umap"]] = orig_dim
+```
+
+##  Perform velocity analysis velocyto.R
+
+```{r}
+seu <- RunVelocity(seu, ncores = 1, reduction = "orig_umap", 
+                   deltaT = 1, kCells = 25, fit.quantile = 0.02)
+
+groups = c("Basal", "B-cells", "Differentiated", "Endothelial", "Fibroblasts",  # 1-5
+           "Macrophages", "Neutrophils", "Progenitor",  # 6-8
+           "Stromal ", "T-cells",  "Dendritic cells") # 9-12
+distinct_exp_group_cols = c(
+  "#E41A1C", "#F781BF", "#4DAF4A", "#984EA3", "#FF7F00", # red , pink, green, purple , orange
+  "goldenrod1", "#A65628", "#377EB8",  #  yellow, brown, blue
+  "darkolivegreen", "khaki",  "chartreuse") # grey, hotpink4, cyan2,
+
+
+Idents(seu) = factor(seu@meta.data$orig_cell_type, levels = groups)
+
+ident.colors <- distinct_exp_group_cols
+names(x = ident.colors) <- levels(x = seu)
+
+cell.colors <- ident.colors[Idents(object = seu)]
+names(x = cell.colors) <- colnames(x = seu)
+
+emb = Embeddings(object = seu, reduction = "orig_umap")
+vel = Tool(object = seu, slot = "RunVelocity")
+
+em <- as.matrix(vel$current)
+ccells <- intersect(rownames(emb), colnames(em))
+em <- em[, ccells]
+emb <- emb[ccells, ]
+nd <- as.matrix(vel$deltaE[, ccells])
+cgenes <- intersect(rownames(em), rownames(nd))
+nd <- nd[cgenes, ]
+em <- em[cgenes, ]
+
+# copied from here: https://github.com/velocyto-team/velocyto.R/blob/master/R/RcppExports.R
+colDeltaCorSqrt <- function(e, d, nthreads = 1L) {
+  .Call('_velocyto_R_colDeltaCorSqrt', PACKAGE = 'velocyto.R', e, d, nthreads)
+}
+
+randomize <- FALSE
+cc <- colDeltaCorSqrt(em, (sqrt(abs(nd)) * sign(nd)),
+                           nthreads = 4)
+colnames(cc) <- rownames(cc) <- colnames(em)
+diag(cc) <- 0
+
+show.velocity.on.embedding.cor(
+    emb = Embeddings(object = seu, reduction = "orig_umap"),
+    vel = Tool(object = seu, slot = "RunVelocity"),
+    cc = cc,
+    n = 100, scale = "sqrt",
+    cell.colors = ac(x = cell.colors, alpha = 0.5),
+    cex = 0.8, arrow.scale = 1, n.cores =1,
+    show.grid.flow = TRUE, min.grid.cell.mass = 0.5,
+    grid.n = 40, arrow.lwd = 1,
+    do.par = FALSE, cell.border.alpha = 0.1)
+
+saveRDS(seu, file = "run_velocity.rds")
+saveRDS(cc, file = "cc.sqrt.orig.umap.rds")
+
+
+```
+
