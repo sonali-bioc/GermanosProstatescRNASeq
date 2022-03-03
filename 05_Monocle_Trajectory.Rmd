@@ -1,0 +1,69 @@
+---
+title: "Trajectory Analysis using Monocle3"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this vignette, we perform a trajectory analaysis using Monocle3.
+First we need to create a "new_cell_data_set" object from our exsiting Seurat object. 
+
+```{r}
+
+library(monocle3)
+library(Seurat)
+library(SeuratWrappers)
+
+seurat.epi = readRDS("seurat_cleaned.epi.rds")
+my.cds =as.cell_data_set(seurat.epi)
+
+```
+
+Next we need to perform the trajectory analysis using monocle3
+
+```{r}
+# do the trajectory analysis : 
+my.cds <- learn_graph(my.cds, use_partition = TRUE)
+t1 = plot_cells(my.cds, label_groups_by_cluster = FALSE, label_leaves = FALSE, label_branch_points = FALSE)  + 
+  ggtitle("Initial Trajectory Plot  ") 
+
+# find root node to start trajectory :
+cell_ids <- which(colData(cds)[, "seurat_clusters"] == 4)
+closest_vertex <- my.cds@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+closest_vertex <- as.matrix(closest_vertex[colnames(my.cds), ])
+root_pr_nodes <-
+ igraph::V(principal_graph(my.cds)[["UMAP"]])$name[as.numeric(names(which.max(table(closest_vertex[cell_ids, ]))))]
+my.cds <- order_cells(my.cds, root_pr_nodes=root_pr_nodes)
+
+
+# plot to visualize pseudotime
+t2 = plot_cells(my.cds,
+               color_cells_by = "pseudotime", label_cell_groups=FALSE,
+               label_leaves=FALSE,   label_branch_points=FALSE,
+               graph_label_size=1.5,  cell_size =0.5) + ggtitle(" Psuedotime for Epithelial Cells")
+
+```
+
+Finally, we can add the trajectory data to the seurat object and save it 
+
+```{r}
+
+seurat.epi <- AddMetaData(
+  object = seurat.epi,
+  metadata = my.cds@principal_graph_aux@listData$UMAP$pseudotime,
+  col.name = "Epithelial.Psuedotime"
+)
+
+# check if plot is made correctly with Seurat object
+FeaturePlot(seurat.epi, c("Epithelial.Psuedotime"), pt.size = 0.1) & scale_color_viridis_c()
+
+# save objects for future use.
+saveRDS(my.cds, "monocle3_cds.epi.rds")
+saveRDS(seurat.epi, "sueurat_cleaned.epi.with.monocle3.rds")
+
+```
