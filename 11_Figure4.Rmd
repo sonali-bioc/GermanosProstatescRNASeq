@@ -1,0 +1,217 @@
+---
+title: "Reproducing Fig4"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this vignette, we generate Figure 4 of the manuscript.
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+library(writexl)
+library(viridis)
+library(readxl)
+library(MASS)
+
+
+seurat = readRDS("seurat_cleaned.allcells.rds")
+seurat.fig4 = seurat[, seurat$genotype %in% c("PTEN_intact", "PTEN_castrate")]
+
+# Function to collapse data from samples to genotypes
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c(Freq = "mean"))
+ return(data_sum)
+}
+```
+
+## Fig 4A: Cell state immune UMAP
+```{r}
+seurat.fig4.imm = seurat.fig4[, seurat.fig4$cell_types %in% 
+  c("B-cells", "T-cells", "Dendritic cells", "Macrophages", "Neutrophils")]
+pdf("figures/cell_state_UMAP_4A.pdf")
+DimPlot(seurat.fig4.imm, group.by = "cell_states")
+dev.off()
+```
+
+## Fig 4B: Immune abundance
+```{r}
+cell.num1 <- table(seurat.fig4$cell_states, seurat.fig4$sample_id)
+cell.num <- t(t(cell.num1) / (colSums(cell.num1))) * 100
+cell.num <- as.data.frame(cell.num)
+cell.num <- separate(cell.num, Var2, c("genotype", "rep"), "-")
+cell.num$genotype <- factor(cell.num$genotype,levels = c("PTEN_intact",
+                                                         "PTEN_castrate"))
+cell.num <- na.omit(cell.num)
+
+## Subset to immune cells
+
+imm.cells = c("B-cells", "CD8", "Delta-Gamma", "NKT", "TRM", "M2", "TAM", "DC", "MDSC")
+cell.num.imm = cell.num[cell.num$Var1 %in% imm.cells,]
+cell.num.imm$Var1 = factor(cell.num.imm$Var1, levels=c("B-cells", "CD8", 
+  "Delta-Gamma", "NKT", "TRM", "M2", "TAM", "DC", "MDSC"))
+
+b.imm <- data_summary(cell.num.imm, varname="Freq",
+  groupnames=c("Var1", "genotype"))
+
+## Dotplot
+
+dot.cell.imm <- ggplot(cell.num.imm, aes(x = genotype, y = Freq)) +
+  geom_jitter(position=position_jitter(w=0.1, h=0.1), size = 2) +
+  scale_color_viridis(discrete = T, option = "viridis") +
+  geom_errorbar(data = b.imm, aes(x = genotype, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  geom_point(data = b.imm, mapping = aes(x =genotype, y= mean),
+    size=6, color="black", shape="-") +
+  ggtitle("") +
+  theme_classic() +
+  facet_wrap( ~ Var1, scale = "free_y") +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+pdf("figures/imm_abundance_states_4B.pdf")
+dot.cell.imm
+dev.off()
+
+data = table(seurat.fig4$sample_id, seurat.fig4$cell_states)
+write.table(data, 'imm_states_abundance_4B.txt')
+
+dataNorm = round(data/rowSums(data) * max(rowSums(data)), digits = 0)
+dataNorm$treatment = c(0,0,1,1,1)
+
+p = c()
+fit = glm.nb(B.cells~treatment, data = dataNorm)
+## Run neg binomial regression on B cells
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2]) ## Extract p-value from results
+fit = glm.nb(Basal~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(CD8~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(DC~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Delta.Gamma~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Differentiated~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Endothelial~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Fibroblasts~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(M2~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(MDSC~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(NKT~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Progenitor~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Stromal~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(TAM~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(TRM~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+
+## Add p-val and p-val corrections to dataframe
+res = cbind(data %>% t, dataNorm[,-16] %>% t, p %>% round(., digits = 10),
+             p.adjust(p, method = "fdr"),
+             p.adjust(p, method = "bonferroni")) %>%
+data.frame %>% cbind(colnames(data), .)
+
+## Add p-val and p-val corrections to dataframe
+res = cbind(data %>% t, dataNorm[,-16] %>% t, p %>% round(., digits = 10),
+             p.adjust(p, method = "fdr"),
+             p.adjust(p, method = "bonferroni")) %>%
+data.frame %>% cbind(colnames(data), .)
+
+## Add column names to tidy it up
+colnames(res) = c("cellType", "PTEN_intact-2", "PTEN_intact-3", 
+  "PTEN_castrate-1", "PTEN_castrate-2", "PTEN_castrate-3",
+  "PTEN_intact-2_Norm", "PTEN_intact-3_Norm", "PTEN_castrate-1_Norm", 
+  "PTEN_castrate-2_Norm", "PTEN_castrate-3_Norm", "p.value", "BH.adjP", "BF.adjP")
+
+## Export table
+write.table(res, file = "imm_abundance_stats_4B.csv", 
+        sep = ",", quote = F, col.names = T, row.names = F)
+
+```
+
+## Fig 4D: Macrophage ligand/receptor expression
+```{r}
+seurat.fig4.macro = seurat.fig4[, seurat.fig4$cell_types %in% c("Macrophages")]
+seurat.fig4.macro$cell_states<- factor(seurat.fig4.macro$cell_states, 
+                                levels = c("TRM", "M2", "TAM"))
+
+seurat.fig4.fib = seurat.fig4[, seurat.fig4$cell_types == "Fibroblasts"]
+
+fib.sig = c("Ccl2", "Ccl7", "Ccl11")
+
+pdf("figures/macro_fibroblasts_signaling_dotplot_2D.pdf", height=4, width = 6)
+DotPlot(seurat.fig4.macro, features = "Ccr2", group.by = "cell_states", 
+	split.by = "genotype", cols = "RdBu") + RotatedAxis()
+DotPlot(seurat.fig4.fib, features = fib.sig, group.by = "cell_states", 
+	split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+```
+
+## Fig 4F: CD8 signaling changes w/ epithelial and macrophage cells
+```{r}
+seurat.fig4.cd8 = seurat.fig4[, seurat.fig4$cell_states %in% 
+   c("CD8", "M2", "TAM", "Basal", "Progenitor", "Differentiated")]
+seurat.fig4.cd8$cell_states = factor(seurat.fig4.cd8$cell_states, 
+    levels = c("Basal", "Progenitor", "Differentiated", "M2", "TAM", "CD8"))
+
+cd8.sig = c("Fam3c", "Cxcl16", "Cd86", "Pdcd1", "Cxcr6", "Ctla4", "Cd28")
+
+pdf("figures/CD8_dotplot_4E.pdf", height = 5, width = 6)
+DotPlot(seurat.fig4.cd8, features = cd8.sig, group.by = "cell_states", 
+	split.by = "genotype", cols = "RdBu") + RotatedAxis()
+dev.off()
+```
+
+## Fig 4G: TNF dotplot
+```{r}
+seurat.fig4.tnf = seurat.fig4[, seurat.fig4$cell_states %in% 
+   c("Basal", "Progenitor", "Fibroblasts", "M2", "TAM", "MDSC")]
+seurat.fig4.tnf$cell_states = factor(seurat.fig4.tnf$cell_states, 
+   levels = c("Basal", "Progenitor", "Fibroblasts", "M2", "TAM", "MDSC"))
+
+tnf.sig = c("Tnfrsf1a", "Dag1", "Ripk1", "Celsr2", "Notch1", "Ptprs", "Vsir", "Tnf")
+
+avg_exp = AverageExpression(object = seurat.fig4.tnf, group.by = c("cell_states", "genotype"))
+avg_exp = avg_exp[[1]] # non-log values
+log2_tnf = log2(avg_exp +1) # log values.
+
+pdf("figures/TNF_dotplot_heatmap.pdf", height = 5, width = 6)
+DotPlot(seurat.fig4.tnf, features = tnf.sig, group.by = "cell_states", 
+	split.by = "genotype", cols = "RdBu") + RotatedAxis()
+pheatmap(log2_tnf[tnf.sig,], scale='row', 
+	 color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100), 
+	 cluster_cols = F)
+dev.off()
+```
