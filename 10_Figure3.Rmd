@@ -1,0 +1,387 @@
+---
+title: "Reproducing Fig3"
+author: "Alex Germanos, Sonali Arora"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this vignette, we generate Figure 3 of the manuscript.
+
+```{r setup}
+library(Seurat)
+library(RColorBrewer)
+library(pheatmap)
+library(GSVA)
+library(stringr)
+library(tidyverse)
+library(viridis)
+library(readxl)
+library(MASS)
+
+# Function to collapse data from samples to genotypes
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c(Freq = "mean"))
+ return(data_sum)
+}
+
+seurat = readRDS('seurat_cleaned.allcells.rds')
+
+seurat.pten = seurat[, seurat$genotype %in% c("PTEN_intact", "PTEN_castrate")]
+seurat.pten = seurat.pten[, seurat.pten$cell_types %in% c("Basal", "Progenitor", "Differentiated")]
+
+seurat.fig3 = seurat[, seurat$genotype %in% c("WT_intact", "PTEN_intact", "PTEN_castrate")]
+seurat.fig3 = seurat.fig3[, seurat.fig3$cell_types %in% c("Basal", "Progenitor", "Differentiated")]
+```
+
+## Fig 3A: UMAP for the diagram
+```{r}
+# Set colors for epi cell types
+epi_types = c("Basal", "Progenitor", "Differentiated")
+epi_colors = c("#E41A1C", "#4DAF4A", "#377EB8")
+
+# Set order for epi cell types in object
+seurat.fig3.epi$cell_types = factor(seurat.fig3.epi$cell_types, levels = epi_types)
+
+pdf("figures/UMAP_3A.pdf")
+DimPlot(seurat.pten, group.by = "cell_types", cols = epi_colors)
+dev.off()
+```
+
+## Fig 3B: Split UMAPs
+```{r}
+pdf("figures/Split_UMAP_3B.pdf", width = 14)
+DimPlot(seurat.pten, group.by = "cell_types", cols = epi_colors, split.by = "genotype")
+dev.off()
+```
+
+
+## Fig 3C: Abundance
+```{r}
+# make table of cell abundance by genotype and cell type
+cell.num1 <- table(seurat.pten$cell_types, seurat.pten$sample_id)
+cell.num <- t(t(cell.num1) / (colSums(cell.num1))) * 100
+cell.num <- as.data.frame(cell.num)
+cell.num <- separate(cell.num, Var2, c("genotype", "rep"), "-")
+cell.num$genotype <- factor(cell.num$genotype,
+                levels = c("PTEN_intact", "PTEN_castrate"))
+cell.num$Var1 = factor(cell.num$Var1, 
+                levels = c("Basal", "Progenitor", "Differentiated"))
+
+# Summarize data to get mean & sd for each genotype/celltype
+a <- data_summary(cell.num, varname="Freq",
+                    groupnames=c("Var1", "genotype"))
+
+# Plot abundance
+dot.cell <- ggplot(cell.num, aes(x = genotype, y = Freq)) +
+  geom_jitter(position=position_jitter(w=0.1, h=0.1), size = 2) +
+  scale_color_viridis(discrete = T, option = "viridis") +
+  geom_errorbar(data = a, aes(x = genotype, y = Freq,
+                              ymin = Freq-sd, ymax = Freq+sd),
+                size=0.5, color="black", width = 0.3) +
+  geom_point(data = a, mapping = aes(x =genotype, y= Freq),
+    size=6, color="black", shape="-") +
+  ggtitle("") +
+  theme_classic() +
+  facet_wrap( ~ Var1, scale = "free_y") +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 40,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+pdf("figures/abundance_dotplot_3C.pdf", height = 3.5, width = 5)
+dot.cell
+dev.off()
+
+# Stats!
+data = table(seurat.pten$sample_id, seurat.pten$cell_types)
+dataNorm = round(data/rowSums(data) * max(rowSums(data)), digits = 0)
+dataNorm$treatment = c(0,0,1,1,1)
+p = c()
+fit = glm.nb(Basal~treatment, data = dataNorm)
+## Run neg binomial regression on B cells
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2]) ## Extract p-value from results
+fit = glm.nb(Differentiated~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+fit = glm.nb(Progenitor~treatment,  data = dataNorm)
+p = c(p, coef(summary(fit))[,'Pr(>|z|)'][2])
+
+## Add p-val and p-val corrections to dataframe
+res = cbind(data %>% t, dataNorm[,-4] %>% t, p %>% round(., digits = 10),
+             p.adjust(p, method = "BH"),
+             p.adjust(p, method = "bonferroni")) %>%
+data.frame %>% cbind(colnames(data), .)
+
+## Add column names to tidy it up
+colnames(res) = c("cellType", "PTEN_intact-2", "PTEN_intact-3", 
+   "PTEN_castrate-1", "PTEN_castrate-2", "PTEN_castrate-3",
+   "PTEN_intact-2_Norm", "PTEN_intact-3_Norm", "PTEN_castrate-1_Norm", 
+   "PTEN_castrate-2_Norm", "PTEN_castrate-3_Norm", "p.value", "BH.adjP", "BF.adjP")
+
+## Export table
+write.table(res, file = "epi_abundance_stats_3C.csv", 
+        sep = ",", quote = F, col.names = T, row.names = F)
+```
+
+
+## Figure 3D: AR barplot
+```{r}
+# calculates average expression of gene for each sample/cell type combo
+avg_exp = AverageExpression(object = seurat.fig3, group.by = c("cell_types", "sample_id"))
+avg_exp = avg_exp[[1]] # non-log values
+log2_avg_exp = log2(avg_exp +1) # log values.
+
+# Calculate signature score
+AR.l <- list("AR" = AR, "CCP" = CCP)
+AR.score <- as.data.frame(t(gsva(data.matrix(log2_avg_exp), AR.l)))
+
+spl <- str_split_fixed(rownames(AR.score), "_", 2)
+spl.cell <- spl[, 1]
+spl.gen <- str_split_fixed(spl[,2], "-", 2)[,1]
+spl.rep <- str_split_fixed(spl[,2], "-", 2)[,2]
+AR.df <- data.frame("Cell" = spl.cell, "Genotype" = spl.gen,
+                       "Rep" = spl.rep, "AR" = AR.score$AR, "CCP" = AR.score$CCP)
+
+a <- data_summary(AR.df, varname="AR",
+                    groupnames=c("Cell", "Genotype"))
+a$Genotype <- factor(a$Genotype,levels = c("WT_intact", "PTEN_intact",
+                                        "PTEN_castrate"))
+a$Cell <- factor(a$Cell, levels = c("Basal", "Progenitor", "Differentiated"))
+
+
+c <- data_summary(AR.df, varname="CCP",
+                   groupnames=c("Cell", "Genotype"))
+c$Genotype <- factor(c$Genotype,levels = c("WT_intact", "PTEN_intact",
+                                         "PTEN_castrate"))
+c$Cell <- factor(c$Cell, levels = c("Basal", "Progenitor", "Differentiated"))
+
+
+p.AR <- ggplot(a, aes(y=mean, x=Genotype, fill = Genotype)) +
+  geom_bar(stat="identity") +
+  facet_wrap( ~ Cell) +
+  scale_color_brewer(palette = "RdBu") +
+  ggtitle("AR Signature") +
+  theme_classic() +
+  xlab("") +
+  ylab("AR Composite Score") +
+  theme(plot.title = element_text(size = 20),
+        axis.title.y = element_text(size = 16),
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 11),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 13,
+                                   face = "bold")) +
+  geom_errorbar(data = a, aes(x = Genotype, y = mean, ymin = mean-sd,
+                              ymax = mean+sd),
+                size=0.5, color="red", width = 0.3)
+
+p.CCP <- ggplot(c, aes(y=mean, x=Genotype, fill = Genotype)) +
+  geom_bar(stat="identity") +
+  facet_wrap( ~ Cell) +
+  scale_color_brewer(palette = "RdBu") +
+  ggtitle("CCP Signature") +
+  theme_classic() +
+  xlab("") +
+  ylab("CCP Composite Score") +
+  theme(plot.title = element_text(size = 20),
+        axis.title.y = element_text(size = 16),
+        strip.text = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 11),
+        axis.text.x = element_text(angle = 50,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 13,
+                                   face = "bold")) +
+  geom_errorbar(data = c, aes(x = Genotype, y = mean, ymin = mean-sd,
+                              ymax = mean+sd),
+                size=0.5, color="red", width = 0.3)
+
+pdf("figures/AR_CCP_barplots_3D.pdf")
+p.AR
+p.AR2
+p.CCP
+dev.off()
+```
+
+
+## Fig 3E: Intermediate UMAPs
+```{r}
+seurat.prog = readRDS("seurat.prog.rds")
+
+# Delete 0-count genes
+gene.counts = rowSums(seurat.prog$RNA)
+seurat.prog = seurat.prog[gene.counts >0,]
+
+pdf("figures/intermediate_UMAPs_3D.pdf")
+DimPlot(seurat.prog, group.by="seurat_clusters")
+DimPlot(seurat.prog, group.by="old_clusters")
+DimPlot(seurat.epi, group.by="seurat_clusters")
+DimPlot(seurat.prog, group.by="genotype")
+DimPlot(seurat.prog, group.by="seurat_clusters", split.by="genotype")
+dev.off()
+```
+
+## Fig 3F: Abundance for intermediate clusters
+```{r}
+# make table of cell abundance by genotype and cell type
+cell.num1 <- table(seurat.prog$seurat_clusters, seurat.prog$sample_id)
+cell.num <- t(t(cell.num1) / (colSums(cell.num1))) * 100
+cell.num <- as.data.frame(cell.num)
+cell.num <- separate(cell.num, Var2, c("genotype", "rep"), "-")
+cell.num$genotype <- factor(cell.num$genotype,levels = c("PTEN_intact",
+                                                         "PTEN_castrate"))
+cell.num$Var1 = factor(cell.num$Var1, levels = c(0,1,2,3,4,5))
+# Summarize data to get mean & sd for each genotype/celltype
+a <- data_summary(cell.num, varname="Freq",
+                    groupnames=c("Var1", "genotype"))
+
+a.in = a[a$genotype == "PTEN_intact",]
+a.cx = a[a$genotype == "PTEN_castrate",]
+
+
+# Plot abundance
+dot.cell <- ggplot(cell.num, aes(x = genotype, y = Freq)) +
+  geom_jitter(position=position_jitter(w=0.1, h=0.1), size = 2) +
+  scale_color_viridis(discrete = T, option = "viridis") +
+  geom_errorbar(data = a, aes(x = genotype, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  geom_point(data = a, mapping = aes(x =genotype, y= mean),
+    size=6, color="black", shape="-") +
+  ggtitle("") +
+  theme_classic() +
+  facet_wrap( ~ Var1, scale = "free_y") +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 40,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+bar.in <- ggplot(a.in, aes(x = Var1, y = mean, fill = Var1)) +
+  geom_bar(stat="identity") +
+  geom_errorbar(data = a.in, aes(x = Var1, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  ggtitle("") +
+  theme_classic() +
+  #facet_wrap( ~ Var1) +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 40,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+
+bar.cx <- ggplot(a.cx, aes(x = Var1, y = mean, fill = Var1)) +
+  geom_bar(stat="identity") +
+  geom_errorbar(data = a.cx, aes(x = Var1, y = mean,
+                              ymin = mean-sd, ymax = mean+sd),
+                size=0.5, color="black", width = 0.3) +
+  ggtitle("") +
+  theme_classic() +
+  #facet_wrap( ~ Var1) +
+  theme(plot.title=element_text(size = 20),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(angle = 40,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 14)) +
+  xlab("") +
+  ylab("Relative Abundance (%)")
+
+
+pdf("figures/prog_abundance_dotplot_S3F.pdf", height = 5, width = 5)
+dot.cell
+bar.cell
+dev.off()
+
+
+pdf("figures/prog_abundance_in_cx_S3F.pdf", height = 3, width = 4)
+bar.in
+bar.cx
+dev.off()
+```
+
+
+## Fig 3G: AR, CCP, translation scores for intermediate clusters
+
+```{r}
+AR <- c('Ar', 'Klk1', 'Nkx3-1', 'Pmepa1', 'Ell2', 'Gnmt', 'Abcc4', 'Acsl3',
+        'Cenpn', 'AA986860', 'Tmprss2', 'Fkbp5', 'Herc3', 'Ptger4', 'Adam7',
+        'Eaf2', 'Zbtb10', 'Nnmt', 'Maf', 'Med28', 'Mphosph9')
+
+CCP <- c('Foxm1', 'Aspm', 'Tk1', 'Prc1', 'Cdc20', 'Bub1b', 'Pbk', 'Dtl',
+         'Cdkn3', 'Rrm2', 'Asf1b', 'Cep55', 'Cdk1', 'Dlgap5', 'Ska1', 'Rad51',
+         'Kif11', 'Birc5', 'Rad54l', 'Cenpm', 'Pclaf', 'Kif20a', 'Pttg1',
+         'Cdca8', 'Nusap1', 'Plk1', 'Cdca3', 'Orc6', 'Cenpf', 'Top2a', 'Mcm10')
+tln.path = read.delim("REACTOME_TRANSLATION.txt")
+tln.path = convertHumanGeneList(tln.path, mouse = mouse, human = human)
+tln.path = tln.path$MGI.symbol
+tln.path = intersect(tln.path, rownames(seurat.basal))
+
+# calculates average expression of gene for each sample/cell type combo
+avg_exp = AverageExpression(object = seurat.basal.pten, group.by = c("seurat_clusters", "genotype"))
+avg_exp = avg_exp[[1]] # non-log values
+log2_prog = log2(avg_exp +1) # log values.
+
+sig.l <- list("AR" = AR, "CCP" = CCP, "Translation" = tln.path)
+sig.score <- as.data.frame(t (gsva(data.matrix(log2_prog), sig.l) ))
+
+pdf("AR_CCP_Translation_score_heatmaps_3G.pdf", height = 2.3, width = 5)
+pheatmap(t(sig.score), display_numbers = F, 
+  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100))
+pheatmap(t(sig.score), display_numbers = F, 
+  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100), 
+  cluster_cols = F, cluster_rows = F)
+dev.off()
+
+pdf("figures/AR_CCP_Translation_gene_heatmaps_3F.pdf")
+pheatmap(log2_prog[AR,], scale="row", cluster_cols = F,
+  annotation_col = data.frame(AR = sig.score$AR,
+  row.names = colnames(log2_prog),  stringsAsFactors = FALSE),
+  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100))
+
+pheatmap(log2_prog[CCP,], scale="row", cluster_cols = F,
+  annotation_col = data.frame(CCP = sig.score$CCP,
+  row.names = colnames(log2_prog), stringsAsFactors = FALSE),
+  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100))
+
+pheatmap(log2_prog[tln.path,], scale = "row", cluster_cols = T,
+   annotation_col = data.frame(Translation = sig.score$Translation,
+   row.names = colnames(log2_prog), stringsAsFactors = FALSE),
+   color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100))
+
+dev.off()
+
+```
