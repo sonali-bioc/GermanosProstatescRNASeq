@@ -1,0 +1,150 @@
+---
+title: "Trajectory Analysis using Palantir"
+author: "Alex Germanos"
+date: "Feb 24, 2022"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Introduction
+
+In this vignette, we will analyze our scRNAseq data using [Palantir](https://github.com/dpeerlab/Palantir)
+
+## Creating Anndata object for Palantir
+
+Since Anndata objects are the preferred mode of loading and 
+filtering data, we will convert our Seurat object to Anndata first.
+
+
+```{r}
+library(Seurat)
+library(loomR)
+library(SeuratDisk)
+library(SeuratData)
+
+seurat = readRDS("seurat_cleaned.allcells.rds")
+seurat.pten.basal <- seurat.pten.epi[, seurat.pten.epi$seurat_clusters %in% c(4,0,15,2)]
+SaveH5Seurat(seurat.pten.basal, filename = "seurat.pten.basal.h5Seurat")
+Convert("seurat.pten.basal.h5Seurat", dest = "h5ad")
+```
+
+## Analyze using Palantir 
+
+```{python}
+import palantir
+import scanpy as sc
+import numpy as np
+import os
+import pandas as pd
+import rpy2 as rp
+import matplotlib
+import matplotlib.pyplot as plt
+
+# Reset random seed
+np.random.seed(5)
+
+# Load data
+ad = sc.read("seurat_pten_basal.h5ad")
+
+# Make matrix into sparse matrix
+from scipy.sparse import csr_matrix
+ad.X = csr_matrix(ad.X)
+
+## Variable gene selection
+sc.pp.highly_variable_genes(ad, n_top_genes=3000, flavor='cell_ranger')
+
+# Note in the manuscript, we did not use highly variable genes and hence use_hvg is set to False.
+# We recommend setting use_hvg to True for other datasets
+sc.pp.pca(ad)
+pca_projections = pd.DataFrame(ad.obsm['X_pca'], index=ad.obs_names)
+
+# Run diffusion maps
+# Palantir next determines the diffusion maps of the data 
+# as an estimate of the low dimensional phenotypic manifold of the data.
+dm_res = palantir.utils.run_diffusion_maps(pca_projections, n_components=5)
+ms_data = palantir.utils.determine_multiscale_space(dm_res, n_eigs = 5)
+
+## Make umap object to plot on
+umap = ad.obsm['X_umap']
+umap = pd.DataFrame(umap, columns=['x','y'], index = ad.obs_names)
+
+## Make new UMAP
+sc.pp.neighbors(ad)
+sc.tl.umap(ad)
+plt.colorbar()
+
+## Visualization
+import harmony
+fdl = harmony.plot.force_directed_layout(dm_res['kernel'], ad.obs_names)
+
+fig, ax = palantir.plot.plot_tsne(fdl)
+plt.savefig("figures_new_20211117/fdl.png")
+fig, ax = palantir.plot.plot_tsne(umap2)
+plt.savefig("figures_new_20211117/umap2.png")
+fig, ax = palantir.plot.plot_tsne(umap)
+plt.savefig("figures_new_20211117/umap.png")
+
+
+## MAGIC Imputation
+# Palantir uses MAGIC to impute the data for visualization and determining gene expression trends.
+
+imp_df = palantir.utils.run_magic_imputation(ad, dm_res)
+```
+## Make Plots using Palantir results
+
+```{python}
+# Plot gene expression on tsne or fdl
+palantir.plot.plot_gene_expression(imp_df, umap, ['Krt18', 'Krt5', 'Ppp1r1b'])
+plt.savefig("figures/umap_genes.png")
+palantir.plot.plot_gene_expression(imp_df, fdl, ['Krt18', 'Krt5', 'Ppp1r1b'])
+plt.savefig("figures/fdl_genes.png")
+palantir.plot.plot_gene_expression(imp_df, umap2, ['Krt18', 'Krt5', 'Ppp1r1b'])
+plt.savefig("figures/umap2_genes.png")
+
+# plot Diffusion components 
+palantir.plot.plot_diffusion_components(umap, dm_res)
+plt.savefig("figures/umap_diffusion.png")
+palantir.plot.plot_diffusion_components(fdl, dm_res)
+plt.savefig("figures/fdl_diffusion.png")
+palantir.plot.plot_diffusion_components(umap2, dm_res)
+plt.savefig("figures/umap2_diffusion.png")
+
+## Gene trends for prog
+genes = ['Pdgfb', 'Trp63', 'Shh', 'Cd109', 'Notch1', 'Sfrp4']
+gene_trends = palantir.presults.compute_gene_trends( pr_res, imp_df.loc[:, genes])
+palantir.plot.plot_gene_trends(gene_trends)
+plt.savefig("figures/stemness_gene_trends.png")
+palantir.plot.plot_gene_trend_heatmaps(gene_trends)
+plt.savefig("figures/figure_gene_trends_heatmap.png")
+
+## Gene trends for basal
+genes = ['Haus1', 'Chek2', 'Pinx1', 'Tpx2', 'Clspn', 'Nde1', 'Aurka', 'Ccnb1', 'Plk1', 'Hmmr', 'Haus5', 'Brca1', 'Ofd1', 'Nbn', 'Abraxas1', 'Nek2', 'Tubg1', 'Cdc25c', 'Aurkb', 'Vps4a', 'Miip', 'Dtl', 'Chek1', 'Cenpf', 'Haus4']
+genes = ['Bmp7', 'Sema5a', 'Nrg1', 'Sema3e', 'Snai2', 'Shh', 'Wnt10a', 'Nrtn']
+genes = ['Ccnb1', 'Cdc25c', 'Cenpf']
+gene_trends = palantir.presults.compute_gene_trends( pr_res, imp_df.loc[:, genes])
+palantir.plot.plot_gene_trends(gene_trends)
+plt.savefig("figures/basal_cycle_fig_gene_trends.png")
+
+## Cluster cells and visualize
+clusters = palantir.utils.determine_cell_clusters(pca_projections)
+palantir.plot.plot_cell_clusters(umap2, clusters )
+plt.savefig("figures_new_20211117/cell_clusters_umap2.png")
+
+## Cluster highly variable genes in one path
+hvg = ad.var['highly_variable']
+hvg = hvg[hvg==True]
+
+gene_trends = palantir.presults.compute_gene_trends(pr_res,
+                    imp_df.loc[:, hvg.index], ['Prog'])
+
+trends = gene_trends['Prog']['trends']
+gene_clusters = palantir.presults.cluster_gene_trends(trends)
+
+palantir.plot.plot_gene_trend_clusters(trends, gene_clusters)
+plt.savefig("gene_clusters_prog_hvg.png")
+
+## Export list of genes + cluster assignment for GSEA in R
+gene_clusters.to_csv('clusters_prog_hvg.csv')
+```
