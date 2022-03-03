@@ -12,3 +12,20 @@ output:
 
 This github repository contains code to reproduce the analysis in our upcoming paper 
 "Defining cellular population dynamics at single cell resolution during prostate cancer progression".
+
+## Downloading the data 
+
+The data for this manuscript is available in GEO at [GSE171336](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE171336)
+
+## Tools used for the Analysis 
+
+1. [SingleCellExperiment](https://bioconductor.org/packages/release/bioc/html/SingleCellExperiment.html) for processing scRNASeq data
+2. [Seurat](https://satijalab.org/seurat/) for processing scRNASeq data
+3. [SingleR](https://bioconductor.org/packages/release/bioc/html/SingleR.html) for performing unbiased cell type recognition
+4. [velocyto.R](https://github.com/velocyto-team/velocyto.R) for RNA velocity analysis
+5. [Monocle](https://cole-trapnell-lab.github.io/monocle3/) for trajectory analysis
+6. [Palantir](https://github.com/dpeerlab/Palantir) for trajectory analysis
+7. [ggplot2](https://ggplot2.tidyverse.org/) for making figures
+8. [GSVA](https://bioconductor.org/packages/release/bioc/html/GSVA.html) for GSVA analysis
+9. [pheatmap](https://cran.r-project.org/web/packages/pheatmap/index.html) for making heatamps
+10. [RColorBrewer](https://cran.r-project.org/web/packages/RColorBrewer/index.html) for color-scheme palettes
