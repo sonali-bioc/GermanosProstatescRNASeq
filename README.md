@@ -10,7 +10,7 @@ output:
 
 ## Introduction
 
-This github repository contains code to reproduce the analysis in our upcoming paper 
+This github repository contains code to reproduce the analysis in our upcoming [paper](https://www.biorxiv.org/content/10.1101/2022.03.02.482711v1)
 "Defining cellular population dynamics at single cell resolution during prostate cancer progression".
 
 ## Tools used for the Analysis 
